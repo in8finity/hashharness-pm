@@ -105,7 +105,8 @@ What still survives bypass is the storage layer:
 - item immutability
 - link-target existence
 - link-type validation
-- deterministic `text_sha256` collision on canonical task identity text
+- deterministic `text_sha256` collision on canonical task identity text (slug uniqueness)
+- `chain_predecessor` head-move check on `prevStatus` / `prevReport` / `prevHeartbeat` (claim race safety, chain continuity)
 
 ## Remaining modeled-out risks
 

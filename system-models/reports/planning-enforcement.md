@@ -29,7 +29,7 @@ The answer must exist at two levels:
 | Terminal absorption | `finished.py` refuses if current status is already `done` or `rejected`; `cancel.py` refuses cancellation of terminal tasks | `planning-finished/SKILL.md` documents terminal refusal; worker loop closes through `pm finished` only | **Enforced** |
 | Proof required for terminal | `finished.py` refuses when no latest `TaskReport` exists | `planning-finished/SKILL.md` requires a report; worker loop step 4 precedes step 5 | **Enforced** |
 | Dependency gate before claim | `next.py` only returns tasks whose `dependsOn` targets are all `done` | `planning-next/SKILL.md` states the selection rule; worker loop claims only what `pm next` returns | **Enforced** |
-| Claim race safety | `executing.py` calls `store.append_claim`; deterministic claim text collides on the same `(task, prevStatus)` so the loser gets `ClaimLost` / exit 8 | `planning-executing/SKILL.md` now documents deterministic-text collision; worker loop handles exit 8 by retrying from `pm next` | **Enforced** |
+| Claim race safety | `executing.py` calls `store.append_claim`; hashharness's native `chain_predecessor` on `prevStatus` compare-and-swaps the TaskStatus head, so the losing append is rejected with 'head moved' which `store` re-classifies as `ClaimLost` / exit 8 | `planning-executing/SKILL.md` documents the head-moved race; worker loop handles exit 8 by retrying from `pm next` | **Enforced** |
 | Slug uniqueness | `plan.py` + `store.create_task()` use `Task.text = "task:<queue>/<slug>"`; duplicate create raises `SlugTaken` / exit 4 | `planning-plan/SKILL.md` documents structural slug enforcement | **Enforced** |
 | Verifier gate on `done` | `finished.py` runs the verifier recorded on the Task and refuses `done` on non-zero exit (exit 9) | `planning-plan/SKILL.md` documents `--verifier`; `planning-finished/SKILL.md` documents verifier refusal; worker loop now treats exit 9 as “fix work or reject” | **Enforced** |
 | Verify requires working task with report | in runtime the verify step is embedded inside `finished.py`; it only runs after `latest_report()` succeeds and while the task is still closeable | `planning-finished/SKILL.md` documents that the verifier runs against the latest report; worker loop structurally reports before finishing | **Enforced** |
@@ -45,7 +45,7 @@ store in a way another tool can inspect later?
 |---|---|---|
 | Terminal absorption | `TaskStatus.attributes.status` + `prevStatus` chain | later transitions read the latest status before writing |
 | Proof required for terminal | `TaskReport` plus `TaskStatus.links.proof` | terminal status points directly at the proof item |
-| Claim race safety | deterministic `TaskStatus.text` for claim records | duplicate claimants collide on the same `text_sha256`; loser never gets a claim record |
+| Claim race safety | per-(work_package_id, type) chain-head pointer maintained by hashharness | concurrent appends specify `prevStatus` = current head; storage atomically advances the head, rejects stale appends with 'head moved'; loser never gets a claim record |
 | Slug uniqueness | deterministic `Task.text = task:<queue>/<slug>` | duplicate slugs collide at the storage identity layer |
 | Verifier gate | terminal `TaskStatus.attributes.verifier*` fields in `finished.py` | verifier command, exit code, and summary are stored on the closing status |
 | Cancellation proof | synthetic `TaskReport` plus `TaskStatus.attributes.cancelled=true` and `links.proof` | cancellation leaves both cause and proof in the chain |
@@ -64,8 +64,10 @@ Those are documentation gaps, not enforcement gaps.
 ## Summary
 
 - The important model properties are all enforced by concrete runtime gates.
-- Claim race enforcement is now accurately documented as a deterministic
-  hash-collision gate, not as a post-append tip re-read.
+- Claim race enforcement is now provided by hashharness's native
+  `chain_predecessor` head-move check on `prevStatus`, replacing the
+  earlier deterministic-text collision trick. The skill / worker-loop
+  contracts (exit codes, retry semantics) are unchanged.
 - Verifier-gated completion is now aligned across model, runtime, and
   skill docs.
 - Cancellation is enforced and modeled, but still under-documented at the
