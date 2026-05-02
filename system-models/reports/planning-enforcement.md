@@ -16,7 +16,7 @@ For each verified-aligned property in `planning-reconciliation.md`, this report 
 | `ProofRequiredForTerminal` | `finished.py`: `if report is None: return 7`. **Imperative.** `cancel.py` synthesizes proof before close. | `pm-finished/SKILL.md`: *"Refuses with exit code 7 if none exists."* **Imperative.** | `G16` (claim → finished without report → exit 7); `G3b` covers verifier-fail variant | **Enforced** at all four layers |
 | `SingleOwner` / `NoDoubleCommit` (claim race) | `store.append_status` raises `HeadMoved` on stale `prevStatus`; `append_claim` re-classifies as `ClaimLost`; `executing.py` exits 8. Storage layer enforces structurally via `chain_predecessor: true`. | `pm-executing/SKILL.md` describes the chain-head compare-and-swap mechanism and exit 8. **Imperative.** | `G6` spawns two `pm executing` against one `new` task; asserts `rcs == [0, 8]` | **Enforced** at all four layers |
 | `DependenciesDoneAtClaim` | `next.py` filter skips tasks where any dep's latest status ≠ `done`; reads link as `record_sha256` and resolves to `text_sha256` via per-call lookup. | `pm-next/SKILL.md` selection rules: *"Skip tasks where any `links.dependsOn` target's latest status is not `done`. **This is the dependency gate.**"* | `G2` (B blocked until A done), `G14` (rejected dep also blocks) | **Enforced** at all four layers |
-| **Cycle / dep validation** (new, plan-time) | `plan.py` exit 11 with three sub-cases: self-loop, non-existent target, forever-blocked target (`rejected`/`superseded`). | `pm-plan/SKILL.md` documents `--depends-on` (validation behavior added but the prose **does not yet enumerate the three exit-11 sub-cases**) | `G18` (self-loop), `G19` (non-existent dep) | **Enforced (code + tests)**, **Mentioned-but-thin (skills)** |
+| **Cycle / dep validation** (new, plan-time) | `plan.py` exit 11 with three sub-cases: self-loop, non-existent target, forever-blocked target (`rejected`/`superseded`). | `pm-plan/SKILL.md` enumerates all three sub-cases under `--depends-on` and lists exit 11 in the exit-codes table. **Imperative.** | `G18` (self-loop), `G19` (non-existent dep) | **Enforced** at all four layers |
 | `UniqueSlugInQueue` | `store.create_task` builds canonical `task:<queue>/<slug>` text; hashharness rejects duplicate `text_sha256` → `SlugTaken` → `plan.py` exit 4. **Structural.** | `pm-plan/SKILL.md` documents `--slug` and structural enforcement | `G9` parallel `pm plan` with same slug → `[0, 4]` | **Enforced** at all four layers |
 | `VerifierGateOnDone` / `VerifyRequiresWorkingReport` | `finished.py`: runs verifier on done; non-zero → exit 9, task stays `working`. `--skip-verifier` records `verifier_exit = -1`. | `pm-finished/SKILL.md` describes verifier flow + exit 9 | `G3` (happy attestation), `G3b` (missing attestation → 9), `G10` (shell verifier exit 1 → 9) | **Enforced** at all four layers |
 | `StickyChainCoherence` / `StickyBindingOnlyAtClaim` | `store.check_sticky_eligibility` invoked from `executing.py`/`heartbeat.py`/`report.py`/`finished.py`; refusal exit 10. | `pm-executing/SKILL.md` documents sticky path; broader semantics in `store.py` docstrings | `G8` exhaustively covers claim binds context, wrong-context report/finished → exit 10, right-context succeeds | **Enforced** at all four layers |
@@ -50,11 +50,10 @@ All audited gates have a complete artifact chain.
 **13/13 properties Enforced** with imperative language at the decision point. Two new gates added this session — preempt-heartbeat (claim race protection across types) and heartbeat owner-check (zombie refusal) — each landed with a structurally faithful implementation.
 
 ### Skill texts layer
-**10/13 properties** have explicit gate prose with imperative language at the canonical SKILL.md (refuses/exits/etc). Three gaps:
+**11/13 properties** have explicit gate prose with imperative language at the canonical SKILL.md (refuses/exits/etc). Two gaps remain:
 
-1. **Cycle / dep validation** — `pm-plan/SKILL.md` documents `--depends-on` but does not enumerate the new exit-11 sub-cases. Easy: 5-line bullet block.
-2. **Heartbeat-vs-reclaim race** — no SKILL.md describes the preempt mechanism (operator concern in `sweep.py` docstring + `pm sweep --help`). Worth surfacing in a `pm-sweep/SKILL.md` if operators routinely tune TTL.
-3. **Zombie heartbeat refusal** — `heartbeat.py` is the only operator-facing text; no `pm-heartbeat/SKILL.md` exists. Heartbeat is a worker-loop concern that today only appears via `pm heartbeat`; a SKILL.md would help if heartbeats become a more discoverable surface.
+1. **Heartbeat-vs-reclaim race** — no SKILL.md describes the preempt mechanism (operator concern in `sweep.py` docstring + `pm sweep --help`). Worth surfacing in a `pm-sweep/SKILL.md` if operators routinely tune TTL.
+2. **Zombie heartbeat refusal** — `heartbeat.py` is the only operator-facing text; no `pm-heartbeat/SKILL.md` exists. Heartbeat is a worker-loop concern that today only appears via `pm heartbeat`; a SKILL.md would help if heartbeats become a more discoverable surface.
 
 ### Tests layer
 **12/13 properties** have direct test coverage (G2, G3, G3b, G6, G8, G9, G10, G11, G12, G13, G14, G16, G17, G18, G19, G20, G21, G22). One gap:
@@ -65,7 +64,6 @@ All audited gates have a complete artifact chain.
 
 | Action | Layer | Effort | Value |
 |---|---|---|---|
-| Add cycle/dep-validation sub-cases to `pm-plan/SKILL.md` | Skills | 5 min | Closes the only Mentioned-but-thin row in the audit |
 | Add a `pm-sweep/SKILL.md` describing the TTL setting and the preempt-heartbeat protocol | Skills | 15 min | Surfaces the operational caveat (heartbeat interval < TTL) |
 | (Optional) Add `pm-heartbeat/SKILL.md` documenting exit 12 + agent-match contract | Skills | 10 min | Discoverability for the zombie-heartbeat gate |
 

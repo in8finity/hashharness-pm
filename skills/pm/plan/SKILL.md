@@ -20,7 +20,19 @@ description: >
   `parentTask` → parent and `spawnedAt` → the parent's *current* TaskStatus
   (the decision point at which the subtask was initiated).
 - `--depends-on sha[,sha...]` — dependency tasks. The task is not eligible
-  for `next` until each dependency reaches status `done`.
+  for `next` until each dependency reaches status `done`. Validated at
+  enqueue time; the following are refused with **exit 11** rather than
+  silently creating an unrunnable task:
+  - **Self-loop**: a sha equal to this task's own prospective
+    `sha256("task:<queue>/<slug>")`. Such a task could never satisfy
+    its own dep gate.
+  - **Non-existent target**: a sha that doesn't resolve to a stored
+    Task. The task would be permanently blocked because `next` cannot
+    read a missing dep's status.
+  - **Forever-blocked target**: a dep whose latest status is `rejected`
+    or `superseded`. These statuses never become `done`, so the new
+    task would block on the queue forever. (Use `pm replan` to revive
+    a rejected dep first, or omit the dep.)
 - `--verifier <spec>` — optional gate that `pm finished` runs before
   allowing the done transition. Forms:
   - **`skill:<skill-name>`** — *self-attestation* (default for
@@ -71,6 +83,9 @@ existing slug-key Task) |
 | 4 | Slug already taken in this queue (either pre-check found it, or a
 concurrent `plan` claimed it first) |
 | 5 | `--parent` was provided but parent has no status yet |
+| 11 | Invalid `--depends-on`: self-loop, non-existent target, or target
+already terminal-not-done (`rejected`/`superseded`). See the
+`--depends-on` description above for the three sub-cases. |
 
 ## Slug uniqueness (structurally enforced)
 
