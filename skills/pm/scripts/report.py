@@ -26,6 +26,8 @@ def main() -> int:
     p.add_argument("--title", required=True)
     p.add_argument("--text")
     p.add_argument("--text-file")
+    p.add_argument("--context-id", default=None,
+                   help="sticky context id (overrides $PM_CONTEXT_ID)")
     args = p.parse_args()
 
     if args.text and args.text_file:
@@ -40,7 +42,7 @@ def main() -> int:
 
     bound = store.status_context_id(store.latest_status(args.task))
     if bound:
-        agent_context = os.environ.get("PM_CONTEXT_ID") or None
+        agent_context = args.context_id or os.environ.get("PM_CONTEXT_ID") or None
         if agent_context != bound:
             sys.stderr.write(
                 f"refusing: task {args.task[:12]} is sticky-bound to "

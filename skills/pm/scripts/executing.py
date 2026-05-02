@@ -43,6 +43,8 @@ def main() -> int:
     p.add_argument("--agent", default=default_agent_id())
     p.add_argument("--note", default="",
                    help="ignored (legacy compat); use --agent for claimant id")
+    p.add_argument("--context-id", default=None,
+                   help="sticky context id (overrides $PM_CONTEXT_ID)")
     args = p.parse_args()
 
     latest_before = store.latest_status(args.task)
@@ -52,7 +54,7 @@ def main() -> int:
         return 6
 
     prev_sha = latest_before["record_sha256"]
-    agent_context = os.environ.get("PM_CONTEXT_ID") or None
+    agent_context = args.context_id or os.environ.get("PM_CONTEXT_ID") or None
 
     task = store.get_task(args.task)
     is_sticky = store.task_is_sticky(task)

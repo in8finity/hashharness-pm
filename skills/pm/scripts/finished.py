@@ -392,6 +392,8 @@ def main() -> int:
     p.add_argument("--verifier-timeout", type=int, default=DEFAULT_TIMEOUT)
     p.add_argument("--skip-verifier", action="store_true",
                    help="DANGER: skip the verifier even if the task declares one")
+    p.add_argument("--context-id", default=None,
+                   help="sticky context id (overrides $PM_CONTEXT_ID)")
     args = p.parse_args()
 
     latest_st = store.latest_status(args.task)
@@ -402,7 +404,7 @@ def main() -> int:
 
     bound = store.status_context_id(latest_st)
     if bound:
-        agent_context = os.environ.get("PM_CONTEXT_ID") or None
+        agent_context = args.context_id or os.environ.get("PM_CONTEXT_ID") or None
         if agent_context != bound:
             sys.stderr.write(
                 f"refusing: task {args.task[:12]} is sticky-bound to "
