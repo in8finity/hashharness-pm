@@ -113,6 +113,7 @@ hashharness-pm/
 │   ├── planning_replan.als          # replan semantics: 4 modes + supersede + cascade-up (8 checks)
 │   ├── planning_cancel_cascade.als  # cancel --cascade correctness: parent-reverse closure (6 checks)
 │   ├── planning_reclaim_cascade.als # reclaim --cascade correctness: working-only release (6 checks)
+│   ├── planning_isolation.als       # cross-queue + workdir isolation (next.py filter; 7 checks, static)
 │   ├── planning.dfy                 # Dafny port of planning.als — unbounded proofs
 │   ├── planning_plan_race.dfy       # Dafny port of planning_plan_race.als
 │   ├── planning_replan.dfy          # Dafny port of planning_replan.als (R1-R8 unbounded)
@@ -218,6 +219,7 @@ bash $verify system-models/planning_plan_race.als  # 1 check, 1 expected-UNSAT
 bash $verify system-models/planning_replan.als     # 8 checks, 4 SAT runs + 2 expected-UNSAT
 bash $verify system-models/planning_cancel_cascade.als  # 6 checks, 3 SAT runs + 1 expected-UNSAT
 bash $verify system-models/planning_reclaim_cascade.als # 6 checks, 3 SAT runs + 2 expected-UNSAT
+bash $verify system-models/planning_isolation.als       # 7 checks, 3 SAT runs + 2 expected-UNSAT (static)
 
 # Dafny (unbounded inductive proofs over the same protocol)
 bash $verify system-models/planning.dfy            # 14 lemmas + 23 functions

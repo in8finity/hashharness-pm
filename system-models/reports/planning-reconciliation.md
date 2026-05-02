@@ -8,8 +8,8 @@ Last updated: 2026-05-02
 
 ## Summary
 
-- **Alloy checks**: 13/13 in `planning.als`; 6/6 in `planning_lease.als`; 1/1 in `planning_plan_race.als`; 8/8 in `planning_replan.als`; 6/6 in `planning_cancel_cascade.als`; 6/6 in `planning_reclaim_cascade.als`. Total **40/40 pass**.
-- **Alloy scenarios**: 11 SAT + 2 expected-UNSAT in `planning.als`; 5 SAT + 2 expected-UNSAT in `planning_lease.als`; 1 expected-UNSAT in `planning_plan_race.als`; 4 SAT + 2 expected-UNSAT in `planning_replan.als`; 3 SAT + 1 expected-UNSAT in `planning_cancel_cascade.als`; 3 SAT + 2 expected-UNSAT in `planning_reclaim_cascade.als`. All match expectations.
+- **Alloy checks**: 13/13 in `planning.als`; 6/6 in `planning_lease.als`; 1/1 in `planning_plan_race.als`; 8/8 in `planning_replan.als`; 6/6 in `planning_cancel_cascade.als`; 6/6 in `planning_reclaim_cascade.als`; 7/7 in `planning_isolation.als`. Total **47/47 pass**.
+- **Alloy scenarios**: 11 SAT + 2 expected-UNSAT in `planning.als`; 5 SAT + 2 expected-UNSAT in `planning_lease.als`; 1 expected-UNSAT in `planning_plan_race.als`; 4 SAT + 2 expected-UNSAT in `planning_replan.als`; 3 SAT + 1 expected-UNSAT in `planning_cancel_cascade.als`; 3 SAT + 2 expected-UNSAT in `planning_reclaim_cascade.als`; 3 SAT + 2 expected-UNSAT in `planning_isolation.als`. All match expectations.
 - **Dafny lemmas**: 14/14 in `planning.dfy` (+ 23 functions); 5/5 in `planning_plan_race.dfy`. Total **19/19 pass**.
 - **Integration tests**: **23/23** golden flows pass (`tests/integration/test_golden.py`).
 - **Source artifacts compared**: code (`skills/pm/scripts/*.py`, `schema_fragment.json`), spec (Alloy/Dafny models), skill prose (`skills/pm/*/SKILL.md`), README, prior reports, integration tests.
@@ -55,7 +55,7 @@ Three structural changes landed since `2026-05-01`:
 | Replan transitions (4 modes) | **Modeled** in `planning_replan.als` | n/a | `replan.py`: in-place reset, `--no-cascade-up`, default cascade-up, supersede+clone | 8 properties verified (R1-R8); G7 covers same modes at runtime |
 | Cascade correctness (cancel) | **Modeled** in `planning_cancel_cascade.als` | n/a | `cancel.py --cascade` + post-R4 fix | 6 properties verified (CC1-CC6); G11, G23, G24 cover at runtime |
 | Cascade correctness (reclaim) | **Modeled** in `planning_reclaim_cascade.als` | n/a | `reclaim.py --cascade` | 6 properties verified (RC1-RC6); G12, G29-G32 cover at runtime |
-| Cross-queue and workdir isolation | **Not yet modeled** | n/a | `next.py` filter | G5 covers workdir at runtime; cross-queue isolation has no test |
+| Cross-queue and workdir isolation | **Modeled** in `planning_isolation.als` (static) | n/a | `next.py` filter | 7 properties verified (Q1-Q2, W1-W4, PCSV); G5 covers workdir at runtime |
 
 ## Gap Assertions (documented exclusions)
 
@@ -69,7 +69,7 @@ Three structural changes landed since `2026-05-01`:
 - ~~**Replan semantics**~~ — closed by `planning_replan.als` (8 properties verified, 4 modes covered as SAT scenarios).
 - ~~**Cascade correctness (cancel)**~~ — closed by `planning_cancel_cascade.als` (6 properties verified, parent-reverse closure semantics formalized).
 - ~~**Cascade correctness (reclaim)**~~ — closed by `planning_reclaim_cascade.als` (6 properties verified, working-only release semantics formalized).
-- **Cross-queue and workdir isolation** — formal property: "a worker in workdir A never claims a task with workdir B".
+- ~~**Cross-queue and workdir isolation**~~ — closed by `planning_isolation.als` (7 properties verified, static model of next.py's filter).
 - **Sticky-context rebinding after reclaim** — does the next claim of a freshly-reclaimed sticky task rebind to a new context? Needs a SAT scenario at minimum.
 - **Verifier subprocess timeout** — race between subprocess kill and late-completion side-effects (operationally low-risk).
 

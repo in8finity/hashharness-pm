@@ -15,6 +15,7 @@ Last updated: 2026-05-02
 | Alloy | `planning_replan.als` | 8/8 checks pass; 4 SAT runs + 2 expected-UNSAT |
 | Alloy | `planning_cancel_cascade.als` | 6/6 checks pass; 3 SAT runs + 1 expected-UNSAT |
 | Alloy | `planning_reclaim_cascade.als` | 6/6 checks pass; 3 SAT runs + 2 expected-UNSAT |
+| Alloy | `planning_isolation.als` | 7/7 checks pass; 3 SAT runs + 2 expected-UNSAT (static model — no Dafny port needed; properties are structural) |
 | Dafny | `planning.dfy` | **19/19 lemmas proved** (+CancelledIsRejectedTerminal, +NoSelfLoopOnPendingTasks, +StickyChainCoherenceLocalParent, +StickyChainCoherenceLocalDep, +StickyBindingOnlyAtClaim); 28 functions well-formed |
 | Dafny | `planning_plan_race.dfy` | 5/5 lemmas proved |
 | Dafny | `planning_replan.dfy` | **11/11 lemmas proved** (new this session — R1–R8 + Inv preservation) |
@@ -22,7 +23,7 @@ Last updated: 2026-05-02
 | Dafny | `planning_cancel_cascade.dfy` | **24 verified** (new this session — CC1–CC6 + Inv preservation + helpers) |
 | Dafny | `planning_reclaim_cascade.dfy` | **25 verified** (new this session — RC1–RC6 + Inv preservation + helpers) |
 
-Alloy total: **40/40 checks pass.** Dafny total: **94 verified** across six .dfy files (planning 19 lemmas + plan_race 5 + replan 11 + lease 10 + cancel_cascade 24 + reclaim_cascade 25).
+Alloy total: **47/47 checks pass.** Dafny total: **94 verified** across six .dfy files (planning 19 lemmas + plan_race 5 + replan 11 + lease 10 + cancel_cascade 24 + reclaim_cascade 25). The new `planning_isolation.als` is a static model whose properties are structural — porting to Dafny would prove the same trivial filter facts; deferred unless trace-level isolation properties are needed.
 
 The chain_predecessor migration was mechanism-agnostic — neither model needed structural change because both abstract claim-race resolution as `commitClaim | abortClaim`, leaving the storage-level enforcement detail under the abstraction. The lease-model extension this session (heartbeat-vs-reclaim race) added two new safety properties to Alloy and is the third Alloy-only family that hasn't been ported to Dafny.
 
