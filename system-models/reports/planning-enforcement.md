@@ -36,6 +36,12 @@ For each verified-aligned property in `planning-reconciliation.md`, this report 
 | **Cancel-cascade CC4** CascadeIsParentTransitive | `cascade()` recurses via `out.extend(cascade(child_sha, …))` | `pm-cancel/SKILL.md` CC4 entry | `G27` (3-deep a→b→c, all rejected) | **Enforced** at all four layers |
 | **Cancel-cascade CC5** NonDescendantUntouched | `find_undone_subtasks` parent-link filter scopes the cascade strictly | `pm-cancel/SKILL.md` CC5 entry | `G28` (sibling with no parent stays working) | **Enforced** at all four layers |
 | **Cancel-cascade CC6** CascadeRefusesAbsorbingRoot | `cancel.py main()` returns 6 if `cancel_one` refuses the primary; cascade never enters | `pm-cancel/SKILL.md` CC6 entry + exit-codes table | `G17` (done root refused), `G23` (superseded root refused) | **Enforced** at all four layers |
+| **Reclaim-cascade RC1** NoWorkingDescendantLeftWorking | `reclaim.py:cascade()` recursive DFS; reclaims every working descendant via `parentTask` reverse-links | `pm-reclaim/SKILL.md` RC1 entry | `G12` (sticky chain reclaim), `G30` (3-deep all-working) | **Enforced** at all four layers |
+| **Reclaim-cascade RC2** NewDescendantsUntouched | `cascade()` skips children where `cur != "working"` | `pm-reclaim/SKILL.md` RC2 entry | `G29` (new child stays new) | **Enforced** at all four layers |
+| **Reclaim-cascade RC3** TerminalDescendantsUntouched | same skip + `find_undone_subtasks` filter | `pm-reclaim/SKILL.md` RC3 entry | `G29` (done child stays done) | **Enforced** at all four layers |
+| **Reclaim-cascade RC4** CascadeIsParentTransitive | `cascade()` recurses via `out.extend(cascade(child_sha, …))` | `pm-reclaim/SKILL.md` RC4 entry | `G30` (3-deep a→b→c) | **Enforced** at all four layers |
+| **Reclaim-cascade RC5** NonDescendantUntouched | `find_undone_subtasks` parent-link filter scopes the cascade | `pm-reclaim/SKILL.md` RC5 entry | `G31` (sibling with no parent stays working) | **Enforced** at all four layers |
+| **Reclaim-cascade RC6** ReclaimRefusesNonWorkingRoot | `reclaim_one` exit 6 if `cur != "working"` | `pm-reclaim/SKILL.md` RC6 entry + exit-codes table | `G32` (new + done roots both refused) | **Enforced** at all four layers |
 | **Heartbeat-vs-reclaim race** (new this session) | `sweep.py` snapshots heartbeat tip; `store.reclaim(preempt_heartbeat=True, …)` writes preempt heartbeat first; `chain_predecessor` on `prevHeartbeat` rejects if a worker raced → `WorkerStillAlive` → sweep aborts. | `pm-sweep/SKILL.md` documents the preempt protocol + the operational caveat (heartbeat interval < TTL). **Imperative.** | `G20` (race lost → worker survives), `G21` (no-race → sweep wins) | **Enforced** at all four layers |
 | **Zombie heartbeat refusal** (new this session) | `heartbeat.py`: `if owner != args.agent: return 12`. **Imperative.** | `pm-heartbeat/SKILL.md` documents exit 12 + the agent-match contract. **Imperative.** | `G22` (A claims → reclaimed → B re-claims → zombie A heartbeat → exit 12) | **Enforced** at all four layers |
 | Schema head race (`set_schema` ordering) | `setup_schema.py` passes `expected_prev` from `get_schema_history`; concurrent set_schema rejected with 'schema head moved'. | (deployment-time, no SKILL.md) | **No test** — `setup_schema.py` is one-shot, rarely concurrent | **Enforced (code)**, **Missing-from-gate (skills + tests)** — acceptable given operational rarity |
@@ -61,13 +67,13 @@ All audited gates have a complete artifact chain.
 ## Per-layer summary
 
 ### Code layer
-**27/27 properties Enforced** with imperative language at the decision point.
+**33/33 properties Enforced** with imperative language at the decision point.
 
 ### Skill texts layer
-**27/27 properties** have explicit gate prose with imperative language at the canonical SKILL.md. The cancel-cascade audit added a "Cascade properties (formally verified)" section to `pm-cancel/SKILL.md` enumerating CC1–CC6 + a boundary note on superseded intermediates.
+**33/33 properties** have explicit gate prose with imperative language at the canonical SKILL.md. The reclaim-cascade audit added a new `pm-reclaim/SKILL.md` enumerating RC1–RC6 (the skill didn't previously exist as a discoverable surface; only `pm reclaim` CLI and `reclaim.py` docstring carried the contract).
 
 ### Tests layer
-**26/27 properties** have direct test coverage (G2, G3, G3b, G6, G7a/b, G8, G9, G10, G11, G12, G13, G14, G16–G28). One gap remains:
+**32/33 properties** have direct test coverage (G2, G3, G3b, G6, G7a/b, G8, G9, G10, G11, G12, G13, G14, G16–G32). One gap remains:
 
 - **Schema-head race** has no test. `setup_schema.py` is a one-shot deployment op; the absence is acceptable given operational rarity.
 
@@ -79,7 +85,7 @@ All audited gates have a complete artifact chain.
 
 ## Verdict
 
-**27/27 model-verified properties enforced** at the code layer. **27/27 also have imperative skill-text coverage**. Test coverage spans 26/27 properties via **29 golden flows** (the schema-head race remains the one untested-by-design item).
+**33/33 model-verified properties enforced** at the code layer. **33/33 also have imperative skill-text coverage**. Test coverage spans 32/33 properties via **33 golden flows** (the schema-head race remains the one untested-by-design item).
 
 The replan-enforcement audit was where the formal model paid off most directly: the `R4 SupersededIsAbsorbing` property surfaced a real `cancel.py` bug that no integration test had exercised, and the `R6 CloneCarriesReplanOf` property surfaced a documentation drift in `pm-replan/SKILL.md`.
 

@@ -932,6 +932,118 @@ def g28_cascade_isolates_non_descendant_sibling() -> None:
               "G28 CC5: non-descendant sibling must remain working")
 
 
+def g29_reclaim_cascade_skips_non_working_descendants() -> None:
+    """G29: parent + new child + done child — reclaim --cascade releases
+    only the parent (the only working descendant); the new child stays
+    new and the done child stays done. Closes RC2 NewDescendantsUntouched
+    and RC3 TerminalDescendantsUntouched coverage gaps."""
+    q = fresh_queue("g29")
+    parent = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "p",
+                           env_extra={"PM_WORKDIR": ""}).stdout
+                        )["task"]["text_sha256"]
+    pm("executing", "--task", parent)
+    new_child = json.loads(pm("plan", "--queue", q, "--title", "C-new",
+                              "--text", "n", "--parent", parent,
+                              env_extra={"PM_WORKDIR": ""}).stdout
+                           )["task"]["text_sha256"]
+    # new_child stays in `new` — never claimed.
+    done_child = json.loads(pm("plan", "--queue", q, "--title", "C-done",
+                               "--text", "d", "--parent", parent,
+                               env_extra={"PM_WORKDIR": ""}).stdout
+                            )["task"]["text_sha256"]
+    pm("executing", "--task", done_child)
+    pm("report", "--task", done_child, "--title", "r", "--text", "ok")
+    pm("finished", "--task", done_child)
+
+    pm("reclaim", "--task", parent, "--cascade", "--reason", "G29")
+
+    assert_eq(store.status_value(store.latest_status(parent)), "new",
+              "G29 parent must be reclaimed to new")
+    assert_eq(store.status_value(store.latest_status(new_child)), "new",
+              "G29 RC2: already-new child must remain new (untouched)")
+    assert_eq(store.status_value(store.latest_status(done_child)), "done",
+              "G29 RC3: done child must remain done (untouched)")
+
+
+def g30_reclaim_cascade_three_deep_transitive() -> None:
+    """G30: a→b→c via parentTask, all working. Reclaim --cascade a
+    reaches c. Closes RC4 CascadeIsParentTransitive coverage gap."""
+    q = fresh_queue("g30")
+    a = json.loads(pm("plan", "--queue", q, "--title", "A", "--text", "a",
+                      env_extra={"PM_WORKDIR": ""}).stdout
+                   )["task"]["text_sha256"]
+    pm("executing", "--task", a)
+    b = json.loads(pm("plan", "--queue", q, "--title", "B", "--text", "b",
+                      "--parent", a,
+                      env_extra={"PM_WORKDIR": ""}).stdout
+                   )["task"]["text_sha256"]
+    pm("executing", "--task", b)
+    c = json.loads(pm("plan", "--queue", q, "--title", "C", "--text", "c",
+                      "--parent", b,
+                      env_extra={"PM_WORKDIR": ""}).stdout
+                   )["task"]["text_sha256"]
+    pm("executing", "--task", c)
+
+    pm("reclaim", "--task", a, "--cascade", "--reason", "G30")
+
+    for t, label in ((a, "a (root)"), (b, "b"), (c, "c (grandchild)")):
+        assert_eq(store.status_value(store.latest_status(t)), "new",
+                  f"G30 RC4: {label} must be reclaimed by transitive cascade")
+
+
+def g31_reclaim_cascade_isolates_sibling() -> None:
+    """G31: reclaim --cascade root + a sibling task with NO parent. The
+    sibling must remain working. Closes RC5 NonDescendantUntouched gap."""
+    q = fresh_queue("g31")
+    root = json.loads(pm("plan", "--queue", q, "--title", "Root", "--text", "r",
+                         env_extra={"PM_WORKDIR": ""}).stdout
+                      )["task"]["text_sha256"]
+    pm("executing", "--task", root)
+    child = json.loads(pm("plan", "--queue", q, "--title", "Child",
+                          "--text", "c", "--parent", root,
+                          env_extra={"PM_WORKDIR": ""}).stdout
+                       )["task"]["text_sha256"]
+    pm("executing", "--task", child)
+    sibling = json.loads(pm("plan", "--queue", q, "--title", "Sibling",
+                            "--text", "s",
+                            env_extra={"PM_WORKDIR": ""}).stdout
+                         )["task"]["text_sha256"]
+    pm("executing", "--task", sibling)
+
+    pm("reclaim", "--task", root, "--cascade", "--reason", "G31")
+
+    assert_eq(store.status_value(store.latest_status(root)), "new",
+              "G31 root must be reclaimed")
+    assert_eq(store.status_value(store.latest_status(child)), "new",
+              "G31 child must be reclaimed via cascade")
+    assert_eq(store.status_value(store.latest_status(sibling)), "working",
+              "G31 RC5: non-descendant sibling must remain working")
+
+
+def g32_reclaim_refuses_non_working_root() -> None:
+    """G32: pm reclaim on a `new` task → exit 6; on a `done` task → exit
+    6. Closes RC6 ReclaimRefusesNonWorkingRoot coverage gap."""
+    q = fresh_queue("g32")
+    # New task: never claimed.
+    new_sha = json.loads(pm("plan", "--queue", q, "--title", "N",
+                            "--text", "new", env_extra={"PM_WORKDIR": ""}
+                            ).stdout)["task"]["text_sha256"]
+    p = pm("reclaim", "--task", new_sha, check=False)
+    assert_eq(p.returncode, 6,
+              f"G32 RC6: reclaim of `new` must exit 6; got {p.returncode}")
+
+    # Done task: drive through to done.
+    done_sha = json.loads(pm("plan", "--queue", q, "--title", "D",
+                             "--text", "done", env_extra={"PM_WORKDIR": ""}
+                             ).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", done_sha)
+    pm("report", "--task", done_sha, "--title", "r", "--text", "ok")
+    pm("finished", "--task", done_sha)
+    p = pm("reclaim", "--task", done_sha, check=False)
+    assert_eq(p.returncode, 6,
+              f"G32 RC6: reclaim of `done` must exit 6; got {p.returncode}")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -966,6 +1078,10 @@ ALL_FLOWS = {
     "G26": g26_cascade_preserves_done_descendants,
     "G27": g27_cascade_three_deep_transitive,
     "G28": g28_cascade_isolates_non_descendant_sibling,
+    "G29": g29_reclaim_cascade_skips_non_working_descendants,
+    "G30": g30_reclaim_cascade_three_deep_transitive,
+    "G31": g31_reclaim_cascade_isolates_sibling,
+    "G32": g32_reclaim_refuses_non_working_root,
 }
 
 

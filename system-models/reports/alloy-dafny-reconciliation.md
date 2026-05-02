@@ -14,10 +14,11 @@ Last updated: 2026-05-02
 | Alloy | `planning_plan_race.als` | 1/1 check pass; 1 expected-UNSAT |
 | Alloy | `planning_replan.als` | 8/8 checks pass; 4 SAT runs + 2 expected-UNSAT |
 | Alloy | `planning_cancel_cascade.als` | 6/6 checks pass; 3 SAT runs + 1 expected-UNSAT |
+| Alloy | `planning_reclaim_cascade.als` | 6/6 checks pass; 3 SAT runs + 2 expected-UNSAT |
 | Dafny | `planning.dfy` | 14/14 lemmas proved; 23 functions well-formed |
 | Dafny | `planning_plan_race.dfy` | 5/5 lemmas proved |
 
-Alloy total: **34/34 checks pass.** Dafny total: **19/19 lemmas pass.**
+Alloy total: **40/40 checks pass.** Dafny total: **19/19 lemmas pass.**
 
 The chain_predecessor migration was mechanism-agnostic — neither model needed structural change because both abstract claim-race resolution as `commitClaim | abortClaim`, leaving the storage-level enforcement detail under the abstraction. The lease-model extension this session (heartbeat-vs-reclaim race) added two new safety properties to Alloy and is the third Alloy-only family that hasn't been ported to Dafny.
 
@@ -45,8 +46,9 @@ The chain_predecessor migration was mechanism-agnostic — neither model needed 
 | **Heartbeat-vs-reclaim race** (new this session) | `planning_lease.als`: `LiveHeartbeatBlocksReclaim`, `ReclaimRequiresStableHeartbeatChain` (+ `HbSinceObs` flag, `heartbeat`/`sweepObserve` transitions) | **NOT MODELED** | **No — Alloy ahead, no Dafny lease port exists** |
 | **Replan semantics** (new — 4 modes) | `planning_replan.als`: 8 properties (R1–R8 covering refusal-on-superseded, reset-only-on-terminal, supersede absorption, dep inheritance, replan_of link, cascade-up scope) | **NOT MODELED** | **No — Alloy ahead, no Dafny replan port exists** |
 | **Cancel cascade correctness** (new) | `planning_cancel_cascade.als`: 6 properties (CC1–CC6 covering parent-reverse closure, terminal preservation, non-descendant isolation, refusal on absorbing root) | **NOT MODELED** | **No — Alloy ahead, no Dafny cascade port exists** |
+| **Reclaim cascade correctness** (new) | `planning_reclaim_cascade.als`: 6 properties (RC1–RC6 covering working-only release, new/terminal preservation, parent-transitive walk, non-descendant isolation, refusal on non-working root) | **NOT MODELED** | **No — Alloy ahead, no Dafny cascade port exists** |
 
-**Aligned: 13/19 shared properties.** Six Alloy-only families (cycle/self-loop refusal, sticky context, lease/reclaim, heartbeat-vs-reclaim race, replan, cancel-cascade correctness) are not in Dafny.
+**Aligned: 13/20 shared properties.** Seven Alloy-only families (cycle/self-loop refusal, sticky context, lease/reclaim, heartbeat-vs-reclaim race, replan, cancel-cascade correctness, reclaim-cascade correctness) are not in Dafny.
 
 ## Discrepancies
 

@@ -1,6 +1,6 @@
 # hashharness-pm
 
-A planning board for parallel agents — twelve Claude Code skills + a `pm` CLI dispatcher backed by [hashharness](https://github.com/in8finity/hashharness)'s append-only hash-chained storage.
+A planning board for parallel agents — thirteen Claude Code skills + a `pm` CLI dispatcher backed by [hashharness](https://github.com/in8finity/hashharness)'s append-only hash-chained storage.
 
 The system was designed against a formal model. The model is in this repo. Three structural fixes that landed (claim race-safety, slug uniqueness, and the migration of claim-race resolution to hashharness's native `chain_predecessor` head-move check) were each driven by counterexamples or properties the model produced before the code changed.
 
@@ -77,7 +77,7 @@ In short: `hashharness-pm` is a small, storage-first coordination layer for para
 ```
 hashharness-pm/
 ├── skills/
-│   └── pm/                          # Twelve Claude Code skills + shared scripts
+│   └── pm/                          # Thirteen Claude Code skills + shared scripts
 │       ├── plan/SKILL.md                    # pm-plan        — enqueue a task
 │       ├── next/SKILL.md                    # pm-next        — pull next runnable task
 │       ├── executing/SKILL.md               # pm-executing   — claim a task
@@ -88,6 +88,7 @@ hashharness-pm/
 │       ├── replan/SKILL.md                  # pm-replan      — restart a task (and dep-chain ancestors) from scratch
 │       ├── heartbeat/SKILL.md               # pm-heartbeat   — keep a working claim alive (exit 12 if lease lost)
 │       ├── sweep/SKILL.md                   # pm-sweep       — reclaim stale working tasks; race-safe via preempt heartbeat
+│       ├── reclaim/SKILL.md                 # pm-reclaim     — manual force-release of a stuck working claim (with --cascade)
 │       ├── auto-skill-execution/SKILL.md    # pm-auto-skill-execution    — drive another skill end-to-end, no prompts
 │       ├── guided-skill-execution/SKILL.md  # pm-guided-skill-execution  — drive another skill with user-in-the-loop gates
 │       ├── skill-shared/extract_steps.py    # SKILL.md step extractor used by auto/guided
@@ -111,6 +112,7 @@ hashharness-pm/
 │   ├── planning_plan_race.als       # slug-race verifier (1 check)
 │   ├── planning_replan.als          # replan semantics: 4 modes + supersede + cascade-up (8 checks)
 │   ├── planning_cancel_cascade.als  # cancel --cascade correctness: parent-reverse closure (6 checks)
+│   ├── planning_reclaim_cascade.als # reclaim --cascade correctness: working-only release (6 checks)
 │   ├── planning.dfy                 # Dafny port of planning.als — unbounded proofs
 │   ├── planning_plan_race.dfy       # Dafny port of planning_plan_race.als
 │   ├── model-isomorphism-check.md   # mapping note for related agent frameworks
@@ -150,7 +152,7 @@ Four chains exist per task: status, report, heartbeat, and (for subtasks) `paren
    ```bash
    skills/pm/scripts/pm setup
    ```
-3. **Use the skills** — invoke through Claude Code via `pm-plan`, `pm-next`, `pm-executing`, `pm-report`, `pm-finished` (or `pm-replan`, `pm-cancel`, `pm-execute`, `pm-heartbeat`, `pm-sweep`, `pm-auto-skill-execution`, `pm-guided-skill-execution`), or call `pm` directly:
+3. **Use the skills** — invoke through Claude Code via `pm-plan`, `pm-next`, `pm-executing`, `pm-report`, `pm-finished` (or `pm-replan`, `pm-cancel`, `pm-execute`, `pm-heartbeat`, `pm-sweep`, `pm-reclaim`, `pm-auto-skill-execution`, `pm-guided-skill-execution`), or call `pm` directly:
    ```bash
    pm plan --title "Build X" --text "Detailed description..."
    pm next                       # pulls the next runnable task
@@ -211,6 +213,7 @@ bash $verify system-models/planning_lease.als      # 6 checks, 5 SAT runs + 2 ex
 bash $verify system-models/planning_plan_race.als  # 1 check, 1 expected-UNSAT
 bash $verify system-models/planning_replan.als     # 8 checks, 4 SAT runs + 2 expected-UNSAT
 bash $verify system-models/planning_cancel_cascade.als  # 6 checks, 3 SAT runs + 1 expected-UNSAT
+bash $verify system-models/planning_reclaim_cascade.als # 6 checks, 3 SAT runs + 2 expected-UNSAT
 
 # Dafny (unbounded inductive proofs over the same protocol)
 bash $verify system-models/planning.dfy            # 14 lemmas + 23 functions
