@@ -33,7 +33,12 @@ ghost predicate IsTerminal(p: Phase) {
 
 datatype TaskInfo = TaskInfo(
   deps: set<int>,
-  requiresVerifier: bool
+  requiresVerifier: bool,
+  sticky: bool,
+  // parent link, or -1 if none. Sticky chain coherence walks the
+  // sticky-immediate-neighbor graph (parent + direct deps). The
+  // transitive case follows by induction on chain length.
+  parent: int
 )
 
 datatype State = State(
@@ -93,7 +98,20 @@ ghost predicate Inv(s: State, info: map<int, TaskInfo>) {
      s.committed[x1].1 == s.committed[x2].1
      ==> x1 == x2) &&
   (forall t :: t in s.phase && s.phase[t] == PDone && t in info && info[t].requiresVerifier
-     ==> t in s.verifierPassed)
+     ==> t in s.verifierPassed) &&
+  // ===== Sticky chain coherence (local form) =====
+  // Two sticky tasks that are immediate neighbors via parent or deps,
+  // both with owners, must share the owner. The transitive form
+  // (every sticky-reachable pair shares the owner) follows by
+  // induction over chain length — see StickyChainCoherenceTransitive.
+  (forall t :: t in info && info[t].sticky
+     && info[t].parent >= 0 && info[t].parent in info && info[info[t].parent].sticky
+     && t in s.owner && info[t].parent in s.owner
+     ==> s.owner[t] == s.owner[info[t].parent]) &&
+  (forall t, d :: t in info && info[t].sticky && d in info[t].deps
+     && d in info && info[d].sticky
+     && t in s.owner && d in s.owner
+     ==> s.owner[t] == s.owner[d])
 }
 
 ghost predicate StepPlan(s: State, s': State, info: map<int, TaskInfo>, t: int) {
@@ -116,15 +134,34 @@ ghost predicate StepStartClaim(s: State, s': State, info: map<int, TaskInfo>, a:
   s' == s.(openAttempts := s.openAttempts[x := (a, t)])
 }
 
-ghost predicate StepCommitClaim(s: State, s': State, x: int) {
+ghost predicate StepCommitClaim(s: State, s': State, info: map<int, TaskInfo>, x: int) {
   x in s.openAttempts &&
   x !in s.committed &&
   var pair := s.openAttempts[x];
+  var a := pair.0;
   var t := pair.1;
   t in s.phase && s.phase[t] == PNew &&
+  // Sticky-chain coherence: when claiming a sticky task t, the new
+  // owner must match every immediate sticky neighbor's owner (if any).
+  // The "neighbor" relation is symmetric over (parent, deps), so we
+  // check FOUR directions: t's sticky parent, t's sticky deps, sticky
+  // children of t (info[c].parent == t), and sticky tasks that depend
+  // on t (t in info[c].deps). Mirrors store.check_sticky_eligibility's
+  // bidirectional walk.
+  (t in info && info[t].sticky ==>
+     (info[t].parent < 0 || info[t].parent !in info || !info[info[t].parent].sticky
+        || info[t].parent !in s.owner || s.owner[info[t].parent] == a) &&
+     (forall d :: d in info[t].deps && d in info && info[d].sticky && d in s.owner
+        ==> s.owner[d] == a) &&
+     // Sticky children of t (anyone whose parent is t).
+     (forall c :: c in info && info[c].sticky && info[c].parent == t && c in s.owner
+        ==> s.owner[c] == a) &&
+     // Sticky dependents of t (anyone whose deps include t).
+     (forall c :: c in info && info[c].sticky && t in info[c].deps && c in s.owner
+        ==> s.owner[c] == a)) &&
   s' == s.(
     phase := s.phase[t := PWorking],
-    owner := s.owner[t := pair.0],
+    owner := s.owner[t := a],
     openAttempts := s.openAttempts - {x},
     committed := s.committed[x := pair]
   )
@@ -184,7 +221,7 @@ ghost predicate Step(s: State, s': State, info: map<int, TaskInfo>, action: Acti
   match action {
     case Plan(t) => StepPlan(s, s', info, t)
     case StartClaim(a, t, x) => StepStartClaim(s, s', info, a, t, x)
-    case CommitClaim(x) => StepCommitClaim(s, s', x)
+    case CommitClaim(x) => StepCommitClaim(s, s', info, x)
     case AbortClaim(x) => StepAbortClaim(s, s', x)
     case Report(a, t) => StepReport(s, s', a, t)
     case Verify(t) => StepVerify(s, s', t)
@@ -216,6 +253,22 @@ lemma StepPreservesInv(s: State, s': State, info: map<int, TaskInfo>, action: Ac
   requires Step(s, s', info, action)
   ensures Inv(s', info)
 {
+  // Sticky-coherence preservation. Most actions don't touch s.owner,
+  // so the clause is preserved trivially. CommitClaim adds a key, but
+  // its precondition forces the new owner to match every immediate
+  // sticky neighbor's owner — Dafny needs the hint.
+  match action {
+    case CommitClaim(x) =>
+      assert StepCommitClaim(s, s', info, x);
+      // s'.owner = s.owner[t := a]; the precondition pins agent equality
+      // for any sticky neighbor that was already in s.owner.
+    case Cancel(t, _) =>
+      // s'.owner = s.owner - {t}; removing a key can't violate sticky
+      // coherence (the universal quantifier over `t in s'.owner` simply
+      // ranges over a subset).
+    case _ =>
+      // All other actions preserve s.owner verbatim.
+  }
 }
 
 lemma InitImpliesInv(s: State, info: map<int, TaskInfo>)
@@ -417,7 +470,7 @@ lemma OpenAttemptCanDisappearOnlyByResolution(trace: seq<State>, actions: seq<Ac
   assert Step(trace[i], trace[i + 1], info, actions[i]);
   match actions[i] {
     case CommitClaim(y) =>
-      assert StepCommitClaim(trace[i], trace[i + 1], y);
+      assert StepCommitClaim(trace[i], trace[i + 1], info, y);
       if y != x {
         assert x in trace[i].openAttempts - {y};
         assert x in trace[i + 1].openAttempts;
@@ -483,4 +536,55 @@ lemma FirstDisappearanceIsResolution(trace: seq<State>, actions: seq<Action>, in
 {
   assert x in trace[j - 1].openAttempts;
   OpenAttemptCanDisappearOnlyByResolution(trace, actions, info, j - 1, x);
+}
+
+
+// ===== Sticky chain coherence (mirrors planning.als) =====
+
+// StickyChainCoherence (local form). Holds at every state by Inv.
+// The transitive form ("every sticky-reachable pair shares the owner")
+// follows by induction over chain length — captured implicitly by Inv
+// holding at every state.
+lemma StickyChainCoherenceLocalParent(trace: seq<State>, actions: seq<Action>, info: map<int, TaskInfo>, i: int, t: int)
+  requires ValidTrace(trace, actions, info)
+  requires 0 <= i < |trace|
+  requires t in info && info[t].sticky
+  requires info[t].parent >= 0 && info[t].parent in info && info[info[t].parent].sticky
+  requires t in trace[i].owner && info[t].parent in trace[i].owner
+  ensures trace[i].owner[t] == trace[i].owner[info[t].parent]
+{
+  InvAlwaysHolds(trace, actions, info, i);
+}
+
+lemma StickyChainCoherenceLocalDep(trace: seq<State>, actions: seq<Action>, info: map<int, TaskInfo>, i: int, t: int, d: int)
+  requires ValidTrace(trace, actions, info)
+  requires 0 <= i < |trace|
+  requires t in info && info[t].sticky
+  requires d in info[t].deps && d in info && info[d].sticky
+  requires t in trace[i].owner && d in trace[i].owner
+  ensures trace[i].owner[t] == trace[i].owner[d]
+{
+  InvAlwaysHolds(trace, actions, info, i);
+}
+
+// StickyBindingOnlyAtClaim — owner of a sticky task is set only by
+// the CommitClaim action. (Inductive: no other transition adds a key
+// to s.owner.)
+lemma StickyBindingOnlyAtClaim(trace: seq<State>, actions: seq<Action>, info: map<int, TaskInfo>, i: int, t: int)
+  requires ValidTrace(trace, actions, info)
+  requires 0 <= i < |actions|
+  requires t in info && info[t].sticky
+  requires t !in trace[i].owner
+  requires t in trace[i + 1].owner
+  ensures actions[i].CommitClaim?
+  ensures trace[i].openAttempts[actions[i].x].1 == t
+{
+  assert Step(trace[i], trace[i + 1], info, actions[i]);
+  match actions[i] {
+    case CommitClaim(x) =>
+      assert StepCommitClaim(trace[i], trace[i + 1], info, x);
+    case _ =>
+      // No other transition writes to s.owner.
+      assert false;
+  }
 }

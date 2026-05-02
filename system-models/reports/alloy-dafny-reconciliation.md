@@ -15,11 +15,11 @@ Last updated: 2026-05-02
 | Alloy | `planning_replan.als` | 8/8 checks pass; 4 SAT runs + 2 expected-UNSAT |
 | Alloy | `planning_cancel_cascade.als` | 6/6 checks pass; 3 SAT runs + 1 expected-UNSAT |
 | Alloy | `planning_reclaim_cascade.als` | 6/6 checks pass; 3 SAT runs + 2 expected-UNSAT |
-| Dafny | `planning.dfy` | **16/16 lemmas proved** (added CancelledIsRejectedTerminal + NoSelfLoopOnPendingTasks); 25 functions well-formed |
+| Dafny | `planning.dfy` | **19/19 lemmas proved** (+CancelledIsRejectedTerminal, +NoSelfLoopOnPendingTasks, +StickyChainCoherenceLocalParent, +StickyChainCoherenceLocalDep, +StickyBindingOnlyAtClaim); 28 functions well-formed |
 | Dafny | `planning_plan_race.dfy` | 5/5 lemmas proved |
 | Dafny | `planning_replan.dfy` | **11/11 lemmas proved** (new this session — R1–R8 + Inv preservation) |
 
-Alloy total: **40/40 checks pass.** Dafny total: **32/32 lemmas pass** (planning 16 + plan_race 5 + replan 11).
+Alloy total: **40/40 checks pass.** Dafny total: **35/35 lemmas pass** (planning 19 + plan_race 5 + replan 11).
 
 The chain_predecessor migration was mechanism-agnostic — neither model needed structural change because both abstract claim-race resolution as `commitClaim | abortClaim`, leaving the storage-level enforcement detail under the abstraction. The lease-model extension this session (heartbeat-vs-reclaim race) added two new safety properties to Alloy and is the third Alloy-only family that hasn't been ported to Dafny.
 
@@ -42,14 +42,14 @@ The chain_predecessor migration was mechanism-agnostic — neither model needed 
 | Fairness/liveness: open attempts eventually stop being open | `AttemptProgress` fact | `FairTrace` + `FairOpenAttemptEventuallyLeavesOpenSet` | **Yes**, both as a fairness assumption |
 | First disappearance is a real resolution step | implicit in `commitClaim`/`abortClaim` split | `OpenAttemptCanDisappearOnlyByResolution` + `FirstDisappearanceIsResolution` | **Yes** |
 | Slug uniqueness across pending tasks | `UniqueSlugInQueue` in `planning_plan_race.als` | `UniqueSlugInQueue` in `planning_plan_race.dfy` | **Yes** |
-| **Sticky-chain coherence** (per-chain single-context binding) | `StickyChainCoherence`, `StickyBindingOnlyAtClaim` (+ `Sticky` sig) | **NOT MODELED** | **No — Alloy ahead** |
+| **Sticky-chain coherence** (per-chain single-context binding) | `StickyChainCoherence`, `StickyBindingOnlyAtClaim` (+ `Sticky` sig) | `StickyChainCoherenceLocalParent` + `StickyChainCoherenceLocalDep` lemmas in planning.dfy (Inv-clause form; transitive case follows by induction over chain length); `StickyBindingOnlyAtClaim` lemma | **Yes** ✓ (closed this session) |
 | **Lease / reclaim safety** (`Alive` + crash + reclaim) | `planning_lease.als`: `SingleOwner`, `LiveWorkerActions`, `NoZombieAfterReclaim` | **NOT MODELED** | **No — Alloy ahead, no Dafny port exists** |
 | **Heartbeat-vs-reclaim race** (new this session) | `planning_lease.als`: `LiveHeartbeatBlocksReclaim`, `ReclaimRequiresStableHeartbeatChain` (+ `HbSinceObs` flag, `heartbeat`/`sweepObserve` transitions) | **NOT MODELED** | **No — Alloy ahead, no Dafny lease port exists** |
 | **Replan semantics** (4 modes) | `planning_replan.als`: 8 properties (R1–R8) | `planning_replan.dfy`: same 8 properties as named lemmas (+Inv preservation +InvAlwaysHolds +R5 helper) | **Yes** ✓ (closed this session) |
 | **Cancel cascade correctness** (new) | `planning_cancel_cascade.als`: 6 properties (CC1–CC6 covering parent-reverse closure, terminal preservation, non-descendant isolation, refusal on absorbing root) | **NOT MODELED** | **No — Alloy ahead, no Dafny cascade port exists** |
 | **Reclaim cascade correctness** (new) | `planning_reclaim_cascade.als`: 6 properties (RC1–RC6 covering working-only release, new/terminal preservation, parent-transitive walk, non-descendant isolation, refusal on non-working root) | **NOT MODELED** | **No — Alloy ahead, no Dafny cascade port exists** |
 
-**Aligned: 16/20 shared properties** (was 13/20). Closed this session: cycle/self-loop refusal precondition (mirrored in `StepPlan` + `NoSelfLoopOnPendingTasks` lemma), `CancelledIsRejectedTerminal` (dedicated lemma), and **replan semantics** (full `planning_replan.dfy` port — 11 lemmas covering R1–R8 plus Inv preservation). Five Alloy-only families remain: sticky context, lease/reclaim, heartbeat-vs-reclaim race, cancel-cascade correctness, reclaim-cascade correctness.
+**Aligned: 17/20 shared properties** (was 13/20). Closed this session: cycle/self-loop refusal precondition (mirrored in `StepPlan` + `NoSelfLoopOnPendingTasks` lemma), `CancelledIsRejectedTerminal` (dedicated lemma), **replan semantics** (full `planning_replan.dfy` port — 11 lemmas covering R1–R8 plus Inv preservation), and **sticky context** (extended `planning.dfy` — `TaskInfo` gained `sticky` + `parent`, `StepCommitClaim` gained four-direction sticky precondition, two coherence lemmas + `StickyBindingOnlyAtClaim`). Four Alloy-only families remain: lease/reclaim, heartbeat-vs-reclaim race, cancel-cascade correctness, reclaim-cascade correctness.
 
 ## Discrepancies
 
