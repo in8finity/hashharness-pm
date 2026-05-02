@@ -12,10 +12,11 @@ Last updated: 2026-05-02
 | Alloy | `planning.als` | 13/13 checks pass; 11 SAT runs + 2 expected-UNSAT |
 | Alloy | `planning_lease.als` | 6/6 checks pass; 5 SAT runs + 2 expected-UNSAT |
 | Alloy | `planning_plan_race.als` | 1/1 check pass; 1 expected-UNSAT |
+| Alloy | `planning_replan.als` | 8/8 checks pass; 4 SAT runs + 2 expected-UNSAT |
 | Dafny | `planning.dfy` | 14/14 lemmas proved; 23 functions well-formed |
 | Dafny | `planning_plan_race.dfy` | 5/5 lemmas proved |
 
-Alloy total: **20/20 checks pass.** Dafny total: **19/19 lemmas pass.**
+Alloy total: **28/28 checks pass.** Dafny total: **19/19 lemmas pass.**
 
 The chain_predecessor migration was mechanism-agnostic — neither model needed structural change because both abstract claim-race resolution as `commitClaim | abortClaim`, leaving the storage-level enforcement detail under the abstraction. The lease-model extension this session (heartbeat-vs-reclaim race) added two new safety properties to Alloy and is the third Alloy-only family that hasn't been ported to Dafny.
 
@@ -41,8 +42,9 @@ The chain_predecessor migration was mechanism-agnostic — neither model needed 
 | **Sticky-chain coherence** (per-chain single-context binding) | `StickyChainCoherence`, `StickyBindingOnlyAtClaim` (+ `Sticky` sig) | **NOT MODELED** | **No — Alloy ahead** |
 | **Lease / reclaim safety** (`Alive` + crash + reclaim) | `planning_lease.als`: `SingleOwner`, `LiveWorkerActions`, `NoZombieAfterReclaim` | **NOT MODELED** | **No — Alloy ahead, no Dafny port exists** |
 | **Heartbeat-vs-reclaim race** (new this session) | `planning_lease.als`: `LiveHeartbeatBlocksReclaim`, `ReclaimRequiresStableHeartbeatChain` (+ `HbSinceObs` flag, `heartbeat`/`sweepObserve` transitions) | **NOT MODELED** | **No — Alloy ahead, no Dafny lease port exists** |
+| **Replan semantics** (new — 4 modes) | `planning_replan.als`: 8 properties (R1–R8 covering refusal-on-superseded, reset-only-on-terminal, supersede absorption, dep inheritance, replan_of link, cascade-up scope) | **NOT MODELED** | **No — Alloy ahead, no Dafny replan port exists** |
 
-**Aligned: 13/17 shared properties.** Four Alloy-only families (cycle/self-loop refusal, sticky context, lease/reclaim, heartbeat-vs-reclaim race) are not in Dafny.
+**Aligned: 13/18 shared properties.** Five Alloy-only families (cycle/self-loop refusal, sticky context, lease/reclaim, heartbeat-vs-reclaim race, replan) are not in Dafny.
 
 ## Discrepancies
 

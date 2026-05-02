@@ -107,8 +107,9 @@ hashharness-pm/
 │       └── README.md
 ├── system-models/
 │   ├── planning.als                 # core protocol model (13 checks)
-│   ├── planning_lease.als           # ownership liveness: crash + reclaim (5 checks)
+│   ├── planning_lease.als           # ownership liveness + heartbeat-vs-reclaim race (6 checks)
 │   ├── planning_plan_race.als       # slug-race verifier (1 check)
+│   ├── planning_replan.als          # replan semantics: 4 modes + supersede + cascade-up (8 checks)
 │   ├── planning.dfy                 # Dafny port of planning.als — unbounded proofs
 │   ├── planning_plan_race.dfy       # Dafny port of planning_plan_race.als
 │   ├── model-isomorphism-check.md   # mapping note for related agent frameworks
@@ -207,6 +208,7 @@ verify=~/.claude/plugins/cache/morozov-claude-plugin/formal-methods/1.3.0/skills
 bash $verify system-models/planning.als            # 13 checks, 11 SAT runs + 2 expected-UNSAT
 bash $verify system-models/planning_lease.als      # 6 checks, 5 SAT runs + 2 expected-UNSAT
 bash $verify system-models/planning_plan_race.als  # 1 check, 1 expected-UNSAT
+bash $verify system-models/planning_replan.als     # 8 checks, 4 SAT runs + 2 expected-UNSAT
 
 # Dafny (unbounded inductive proofs over the same protocol)
 bash $verify system-models/planning.dfy            # 14 lemmas + 23 functions
