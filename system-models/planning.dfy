@@ -99,6 +99,7 @@ ghost predicate Inv(s: State, info: map<int, TaskInfo>) {
 ghost predicate StepPlan(s: State, s': State, info: map<int, TaskInfo>, t: int) {
   t in info &&
   t !in s.pending &&
+  t !in info[t].deps &&                            // mirror plan.py exit-11 self-loop refusal
   (forall d :: d in info[t].deps ==> d in s.pending) &&
   s' == s.(
     pending := s.pending + {t},
@@ -338,6 +339,71 @@ lemma CancelOnlyOnNonTerminal(trace: seq<State>, actions: seq<Action>, info: map
   match actions[i] {
     case Cancel(t, actor) =>
       assert StepCancel(trace[i], trace[i + 1], t, actor);
+  }
+}
+
+// CancelledIsRejectedTerminal — explicit lemma matching the Alloy
+// assertion of the same name in planning.als. Semantically equivalent
+// to (Inv's `cancelled[t] ⇒ phase[t] == PRejected`) ∧ TerminalAbsorbing,
+// but stated by name so the cross-formalism table reads directly.
+lemma CancelledIsRejectedTerminal(trace: seq<State>, actions: seq<Action>, info: map<int, TaskInfo>, i: int, j: int, t: int)
+  requires ValidTrace(trace, actions, info)
+  requires 0 <= i < |trace|
+  requires i <= j < |trace|
+  requires t in trace[i].cancelled
+  ensures t in trace[j].phase
+  ensures trace[j].phase[t] == PRejected
+{
+  InvAlwaysHolds(trace, actions, info, i);
+  assert trace[i].phase[t] == PRejected;
+  TerminalAbsorbing(trace, actions, info, i, t);
+}
+
+// NoSelfLoopOnPendingTasks — every task that's currently pending was
+// admitted by StepPlan, which requires `t !in info[t].deps`. Since
+// `info` is immutable across the trace, the property holds at every
+// state. Mirrors the Alloy `plan[t]` precondition `t not in t.deps`
+// added in planning.als alongside plan.py's exit-11 self-loop refusal.
+//
+// This is the per-state form. The "every cycle is a self-loop" claim
+// is left as a comment because cycles longer than self-loops are
+// unreachable by construction: each Task's deps are fixed at create
+// time (no transition mutates info), and StepPlan adds a new task `t`
+// that can't be the target of any pre-existing dep (its identity is
+// brand-new). So a cycle would need either a self-loop (refused) or
+// retroactive mutation of an existing Task's deps (impossible).
+lemma NoSelfLoopOnPendingTasks(trace: seq<State>, actions: seq<Action>, info: map<int, TaskInfo>, i: int, t: int)
+  requires ValidTrace(trace, actions, info)
+  requires 0 <= i < |trace|
+  requires t in info
+  requires t in trace[i].pending
+  ensures t !in info[t].deps
+  decreases i
+{
+  if i == 0 {
+    // Init: pending is empty, so the precondition `t in pending`
+    // is false — Dafny resolves vacuously.
+  } else if t in trace[i-1].pending {
+    // t was already pending at i-1 — recurse.
+    NoSelfLoopOnPendingTasks(trace, actions, info, i-1, t);
+  } else {
+    // t entered pending at step i-1. Only StepPlan(t) admits new
+    // tasks, and it requires `t !in info[t].deps`.
+    assert Step(trace[i-1], trace[i], info, actions[i-1]);
+    match actions[i-1] {
+      case Plan(t2) =>
+        assert StepPlan(trace[i-1], trace[i], info, t2);
+        if t2 == t {
+          // StepPlan's precondition gives us the result.
+        } else {
+          // pending = pending + {t2} — t can only have entered if t == t2.
+          assert false;
+        }
+      case _ =>
+        // Non-Plan steps don't add to pending.
+        assert trace[i].pending == trace[i-1].pending;
+        assert false;
+    }
   }
 }
 

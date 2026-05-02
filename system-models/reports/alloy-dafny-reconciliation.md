@@ -15,10 +15,10 @@ Last updated: 2026-05-02
 | Alloy | `planning_replan.als` | 8/8 checks pass; 4 SAT runs + 2 expected-UNSAT |
 | Alloy | `planning_cancel_cascade.als` | 6/6 checks pass; 3 SAT runs + 1 expected-UNSAT |
 | Alloy | `planning_reclaim_cascade.als` | 6/6 checks pass; 3 SAT runs + 2 expected-UNSAT |
-| Dafny | `planning.dfy` | 14/14 lemmas proved; 23 functions well-formed |
+| Dafny | `planning.dfy` | **16/16 lemmas proved** (added CancelledIsRejectedTerminal + NoSelfLoopOnPendingTasks); 25 functions well-formed |
 | Dafny | `planning_plan_race.dfy` | 5/5 lemmas proved |
 
-Alloy total: **40/40 checks pass.** Dafny total: **19/19 lemmas pass.**
+Alloy total: **40/40 checks pass.** Dafny total: **21/21 lemmas pass.**
 
 The chain_predecessor migration was mechanism-agnostic — neither model needed structural change because both abstract claim-race resolution as `commitClaim | abortClaim`, leaving the storage-level enforcement detail under the abstraction. The lease-model extension this session (heartbeat-vs-reclaim race) added two new safety properties to Alloy and is the third Alloy-only family that hasn't been ported to Dafny.
 
@@ -32,12 +32,12 @@ The chain_predecessor migration was mechanism-agnostic — neither model needed 
 | Single owner / working has owner | `SingleOwner`, `OwnerStableThroughWorkingPhase` | implicit via `owner: map<int,int>` + `Inv` predicate | **Yes** (structural in Dafny — a `map` cannot have two values for one key) |
 | Claim-race safety: at most one committed attempt per task | `NoDoubleCommit` | `NoDoubleCommitPerTask` | **Yes** |
 | Dependency gate before claim | `DependenciesDoneAtClaim` | `DependenciesDoneAtClaim` | **Yes** |
-| **Cycle / self-loop refusal at plan time** (new) | `plan[t]` precondition `t not in t.deps`; `fact NoCycle` annotated as derived | **NOT MODELED** as an explicit precondition; Dafny's `StepPlan` has no equivalent guard | **No — Alloy ahead (small)** |
+| **Cycle / self-loop refusal at plan time** | `plan[t]` precondition `t not in t.deps`; `fact NoCycle` annotated as derived | `StepPlan` precondition `t !in info[t].deps` + `NoSelfLoopOnPendingTasks` lemma | **Yes** ✓ (closed this session) |
 | Verifier gate on `done` | `VerifierGateOnDone` | `VerifierGateOnDone` | **Yes** |
 | Verify only on working+report | `VerifyRequiresWorkingReport` | `VerifyRequiresWorkingReport` | **Yes** |
 | Cancel only on non-terminal | `CancelOnlyOnNonTerminal` | `CancelOnlyOnNonTerminal` | **Yes** |
 | Cancelled tasks carry proof | `CancelledHasProof` | `CancelledHasProof` | **Yes** |
-| Cancelled is rejected & terminal-absorbing | `CancelledIsRejectedTerminal` (dedicated assertion) | held via `Inv` (`cancelled[t] ⇒ phase[t]==PRejected`) + `TerminalAbsorbing`, **no dedicated lemma** | **Yes (semantically)**, **no (presentationally)** |
+| Cancelled is rejected & terminal-absorbing | `CancelledIsRejectedTerminal` (dedicated assertion) | `CancelledIsRejectedTerminal` (dedicated lemma, calls `InvAlwaysHolds` + `TerminalAbsorbing`) | **Yes** ✓ (closed this session) |
 | Fairness/liveness: open attempts eventually stop being open | `AttemptProgress` fact | `FairTrace` + `FairOpenAttemptEventuallyLeavesOpenSet` | **Yes**, both as a fairness assumption |
 | First disappearance is a real resolution step | implicit in `commitClaim`/`abortClaim` split | `OpenAttemptCanDisappearOnlyByResolution` + `FirstDisappearanceIsResolution` | **Yes** |
 | Slug uniqueness across pending tasks | `UniqueSlugInQueue` in `planning_plan_race.als` | `UniqueSlugInQueue` in `planning_plan_race.dfy` | **Yes** |
@@ -48,7 +48,7 @@ The chain_predecessor migration was mechanism-agnostic — neither model needed 
 | **Cancel cascade correctness** (new) | `planning_cancel_cascade.als`: 6 properties (CC1–CC6 covering parent-reverse closure, terminal preservation, non-descendant isolation, refusal on absorbing root) | **NOT MODELED** | **No — Alloy ahead, no Dafny cascade port exists** |
 | **Reclaim cascade correctness** (new) | `planning_reclaim_cascade.als`: 6 properties (RC1–RC6 covering working-only release, new/terminal preservation, parent-transitive walk, non-descendant isolation, refusal on non-working root) | **NOT MODELED** | **No — Alloy ahead, no Dafny cascade port exists** |
 
-**Aligned: 13/20 shared properties.** Seven Alloy-only families (cycle/self-loop refusal, sticky context, lease/reclaim, heartbeat-vs-reclaim race, replan, cancel-cascade correctness, reclaim-cascade correctness) are not in Dafny.
+**Aligned: 15/20 shared properties** (was 13/20). Closed this session: cycle/self-loop refusal precondition (now mirrored in `StepPlan` + `NoSelfLoopOnPendingTasks` lemma) and `CancelledIsRejectedTerminal` (now a dedicated Dafny lemma). Six Alloy-only families remain: sticky context, lease/reclaim, heartbeat-vs-reclaim race, replan, cancel-cascade correctness, reclaim-cascade correctness.
 
 ## Discrepancies
 
