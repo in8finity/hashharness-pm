@@ -2,7 +2,7 @@
 
 A planning board for parallel agents — ten Claude Code skills + a `pm` CLI dispatcher backed by [hashharness](https://github.com/in8finity/hashharness)'s append-only hash-chained storage.
 
-The system was designed against a formal model. The model is in this repo. Both fixes that landed (claim race-safety, slug uniqueness) were driven by counterexamples the model produced before the code changed.
+The system was designed against a formal model. The model is in this repo. Three structural fixes that landed (claim race-safety, slug uniqueness, and the migration of claim-race resolution to hashharness's native `chain_predecessor` head-move check) were each driven by counterexamples or properties the model produced before the code changed.
 
 ## Goal
 
@@ -78,46 +78,60 @@ In short: `hashharness-pm` is a small, storage-first coordination layer for para
 hashharness-pm/
 ├── skills/
 │   └── pm/                          # Ten Claude Code skills + shared scripts
-│       ├── plan/SKILL.md                    # enqueue a task
-│       ├── next/SKILL.md                    # pull next runnable task
-│       ├── executing/SKILL.md               # claim a task
-│       ├── report/SKILL.md                  # submit proof of work
-│       ├── finished/SKILL.md                # close as done/rejected
-│       ├── execute/SKILL.md                 # spawn N parallel workers
-│       ├── cancel/SKILL.md                  # supervisor override: terminate + cascade to subtasks
-│       ├── replan/SKILL.md                  # restart a task (and dep-chain ancestors) from scratch
-│       ├── auto-skill-execution/SKILL.md    # drive another skill end-to-end through the queue, no prompts
-│       ├── guided-skill-execution/SKILL.md  # drive another skill step-by-step with user-in-the-loop gates
+│       ├── plan/SKILL.md                    # pm-plan        — enqueue a task
+│       ├── next/SKILL.md                    # pm-next        — pull next runnable task
+│       ├── executing/SKILL.md               # pm-executing   — claim a task
+│       ├── report/SKILL.md                  # pm-report      — submit proof of work
+│       ├── finished/SKILL.md                # pm-finished    — close as done/rejected
+│       ├── execute/SKILL.md                 # pm-execute     — spawn N parallel workers
+│       ├── cancel/SKILL.md                  # pm-cancel      — supervisor override: terminate + cascade to subtasks
+│       ├── replan/SKILL.md                  # pm-replan      — restart a task (and dep-chain ancestors) from scratch
+│       ├── auto-skill-execution/SKILL.md    # pm-auto-skill-execution    — drive another skill end-to-end, no prompts
+│       ├── guided-skill-execution/SKILL.md  # pm-guided-skill-execution  — drive another skill with user-in-the-loop gates
+│       ├── skill-shared/extract_steps.py    # SKILL.md step extractor used by auto/guided
 │       ├── scripts/
-│       │   ├── pm                   # bash dispatcher
-│       │   ├── plan.py / next.py / executing.py / report.py / finished.py
-│       │   ├── store.py             # hashharness write helpers + SlugTaken
-│       │   ├── mcp_client.py        # JSON-RPC over HTTP (tool / tool_safe)
-│       │   ├── pull.py              # atomic next + claim with race retry
-│       │   ├── bulk_plan.py / heal_orphans.py / queue_status.py
-│       │   ├── now_iso.py
-│       │   ├── setup_schema.py      # registers Task/TaskStatus/TaskReport types
-│       │   └── schema_fragment.json
+│       │   ├── pm                       # bash dispatcher
+│       │   ├── plan.py / next.py / executing.py / report.py / finished.py   # worker-loop primitives
+│       │   ├── replan.py / cancel.py / sweep.py / reclaim.py / heartbeat.py # supervisor primitives
+│       │   ├── pull.py                  # atomic next + claim with race retry
+│       │   ├── store.py                 # hashharness write helpers + HeadMoved/SlugTaken/ClaimLost
+│       │   ├── mcp_client.py            # JSON-RPC over HTTP (tool / tool_safe)
+│       │   ├── setup_schema.py          # registers Task/TaskStatus/TaskReport/TaskHeartbeat
+│       │   ├── schema_fragment.json     # schema with chain_predecessor links
+│       │   ├── context_id.py            # PM_CONTEXT_ID generator (sticky-session id)
+│       │   ├── bulk_plan.py / heal_orphans.py / queue_status.py             # operator helpers
+│       │   ├── stress_claim_race.py     # race smoke-tester
+│       │   └── now_iso.py
 │       └── README.md
-└── system-models/
-    ├── planning.als                 # core protocol model
-    ├── planning_plan_race.als       # slug-race verifier
-    └── reports/
-        ├── planning-reconciliation.md
-        └── planning-enforcement.md
+├── system-models/
+│   ├── planning.als                 # core protocol model (13 checks)
+│   ├── planning_lease.als           # ownership liveness: crash + reclaim (5 checks)
+│   ├── planning_plan_race.als       # slug-race verifier (1 check)
+│   ├── planning.dfy                 # Dafny port of planning.als — unbounded proofs
+│   ├── planning_plan_race.dfy       # Dafny port of planning_plan_race.als
+│   ├── model-isomorphism-check.md   # mapping note for related agent frameworks
+│   └── reports/
+│       ├── planning-reconciliation.md       # model ↔ code/skills cross-source audit
+│       ├── planning-enforcement.md          # gate audit chain across model/code/skills/tests
+│       ├── alloy-dafny-reconciliation.md    # Alloy ↔ Dafny coverage diff
+│       ├── planning-blind-spots.md          # known gaps & open questions
+│       └── cache-staleness-investigation.md # historical: pre-migration claim-race investigation
+└── tests/
+    └── integration/test_golden.py    # 17 golden-flow live integration tests
 ```
 
 ## Storage model (hashharness)
 
-Three item types are registered in the planning schema:
+Four item types are registered in the planning schema:
 
 | Type | `text` | Key attributes | Links |
 |---|---|---|---|
-| **Task** | `task:<queue>/<slug>` (canonical key — slug uniqueness is structural) | `slug`, `queue`, `body` (the user's prose) | `parentTask`, `spawnedAt → TaskStatus`, `dependsOn[]` |
-| **TaskStatus** | `<note>\n#nonce:<random>` | `status ∈ {new, working, done, rejected}` | `task`, `prevStatus`, `proof → TaskReport` |
-| **TaskReport** | the user's report body | (none) | `task`, `prevReport` |
+| **Task** | `task:<queue>/<slug>` (canonical key — slug uniqueness is structural) | `slug`, `queue`, `body`, optional `verifier`, `sticky`, `workdir` | `parentTask`, `spawnedAt → TaskStatus`, `dependsOn[]` |
+| **TaskStatus** | `<note>\n#nonce:<random>` | `status ∈ {new, working, done, rejected, superseded}`; sticky claims also carry `context_id`; reclaim/cancel close-out statuses carry `reclaimed` / `cancelled` flags | `task`, `prevStatus` (chain_predecessor), `proof → TaskReport` |
+| **TaskReport** | the user's report body | (none — body is the proof) | `task`, `prevReport` (chain_predecessor) |
+| **TaskHeartbeat** | `hb:<task[:8]>:<agent>\n#nonce:<random>` | `agent` | `task`, `claimStatus → TaskStatus(working)`, `prevHeartbeat` (chain_predecessor) |
 
-Three chains exist per task: status, report, and (for subtasks) `parentTask` plus `spawnedAt` to the parent's TaskStatus current at spawn time.
+Four chains exist per task: status, report, heartbeat, and (for subtasks) `parentTask` plus `spawnedAt` to the parent's TaskStatus current at spawn time. The three `chain_predecessor` links are the load-bearing race-resolution gate — hashharness compare-and-swaps the per-(work_package_id, type) head pointer on every append, rejecting stale writes with 'head moved'.
 
 ## Quick start
 
@@ -145,16 +159,19 @@ The skills read `HASHHARNESS_MCP_URL` (default `http://127.0.0.1:38417/mcp`).
 
 ## Concurrency guarantees (formally verified)
 
-The Alloy model proves these hold under any interleaving of parallel agents using `pm`:
+The Alloy models prove these hold under any interleaving of parallel agents using `pm`:
 
 | Property | Where enforced |
 |---|---|
-| Done/rejected is absorbing — a finished task never transitions out | `finished.py` rejects unless current is `working`/`new` |
-| A terminal status always has a `proof` link to a TaskReport | `finished.py` refuses without a report |
+| Done/rejected is absorbing — a finished task never transitions out | `finished.py` rejects unless current is `working`/`new`; `cancel.py` exit 6 on terminal |
+| A terminal status always has a `proof` link to a TaskReport | `finished.py` refuses without a report → exit 7; `cancel_task` synthesizes proof before the rejected status |
 | At most one agent owns the latest TaskStatus of a task | hashharness `chain_predecessor` on `prevStatus` (compare-and-swap on the TaskStatus head) → `HeadMoved` → `ClaimLost` → `executing.py` exit 8 |
 | Dependencies are `done` at the moment a task is claimed | `next.py` skips blocked tasks |
+| Verifier-required tasks cannot reach `done` without a passing verifier | `finished.py` runs the verifier and refuses on non-zero exit → exit 9 |
+| Sticky chains stay bound to one agent context | `store.check_sticky_eligibility`; refusal exit 10 across `executing`/`heartbeat`/`report`/`finished` |
+| A live worker is never wrongly reclaimed; a dead worker's task is recoverable | `sweep.py` only reclaims tasks past heartbeat TTL; `store.reclaim` appends `new` status with `reclaimed=true` (`planning_lease.als`) |
 | Two parallel `pm plan` calls cannot both create the same slug | `Task.text` is `task:<queue>/<slug>`; hashharness rejects duplicate `text_sha256` → `SlugTaken` → exit 4 |
-| Every claim attempt eventually resolves (commit or abort) | `executing.py` always exits 0/6/8 |
+| Every claim attempt eventually resolves (commit or abort) | `executing.py` always exits 0/6/8/10 |
 
 Both race conditions are content-addressed gates inside hashharness: slug uniqueness rides the `text_sha256` index, and claim ordering rides the per-(work_package_id, type) `chain_predecessor` head pointer. The scripts plumb those structural rejections up to the operator-visible exit codes.
 
@@ -162,17 +179,17 @@ Both race conditions are content-addressed gates inside hashharness: slug unique
 
 ```
 1. pm next --queue <Q>             → JSON or "null"
-2. pm executing --task TASK        → exit 0 win | 6 pre-claim | 8 race-lost
+2. pm executing --task TASK        → exit 0 win | 6 pre-claim refusal | 8 race-lost | 10 sticky-context refusal
 3. read task.attributes.body, do the work
 4. pm report --task TASK --title T --text-file ...
-5. pm finished --task TASK         → requires report, exits 7 if missing
+5. pm finished --task TASK         → exit 0 done | 7 missing report | 9 verifier failed | 10 sticky-context refusal
 ```
 
-`pm execute` (the `pm-execute` skill) spawns N agents in parallel running this loop.
+`pm plan` itself can also exit 4 (slug already taken in this queue). `pm execute` (the `pm-execute` skill) spawns N agents in parallel running this loop.
 
 ## Threat model
 
-The formal model verifies the protocol assuming every state transition goes through `pm`. A client writing directly to hashharness via MCP can bypass most assertions (state-machine ordering, proof-of-work, dep gate, claim recheck). What survives a bypass is the storage layer: item immutability, schema link types, link-target existence, and `text_sha256` uniqueness on the canonical slug key.
+The formal model verifies the protocol assuming every state transition goes through `pm`. A client writing directly to hashharness via MCP can bypass most assertions (state-machine ordering, proof-of-work, dep gate, sticky-context check, verifier gate). What survives a bypass is the storage layer: item immutability, schema link types, link-target existence, `text_sha256` uniqueness on the canonical slug key, and `chain_predecessor` head-move enforcement on `prevStatus` / `prevReport` / `prevHeartbeat` (so even a bypass can't double-claim or fork a chain).
 
 For cooperative-agent usage (the actual use case), convention is sufficient. See `system-models/reports/planning-reconciliation.md#threat-model` for hardening options if adversarial bypass becomes a concern.
 
@@ -182,16 +199,25 @@ For cooperative-agent usage (the actual use case), convention is sufficient. See
 # Bring the formal-methods skill's runner along:
 verify=~/.claude/plugins/cache/morozov-claude-plugin/formal-methods/1.3.0/skills/formal-modeling/scripts/verify.sh
 
-bash $verify system-models/planning.als            # 6 checks, 5 scenarios — all pass
-bash $verify system-models/planning_plan_race.als  # 1 check, 1 scenario
+# Alloy (bounded counterexamples + scenarios)
+bash $verify system-models/planning.als            # 13 checks, 11 SAT runs + 2 expected-UNSAT
+bash $verify system-models/planning_lease.als      # 5 checks, 3 SAT runs + 1 expected-UNSAT
+bash $verify system-models/planning_plan_race.als  # 1 check, 1 expected-UNSAT
+
+# Dafny (unbounded inductive proofs over the same protocol)
+bash $verify system-models/planning.dfy            # 14 lemmas + 23 functions
+bash $verify system-models/planning_plan_race.dfy  # 5 lemmas
 ```
 
 To reproduce the historical slug-race counterexample, swap `commitPlan[p]` for `commitPlanBuggy[p]` in `planning_plan_race.als`'s `Transitions` fact and re-run; the counterexample re-appears in 4 steps.
 
 ## Reports
 
-- `system-models/reports/planning-reconciliation.md` — per-property cross-source consistency table, threat model, boundary review.
-- `system-models/reports/planning-enforcement.md` — for each verified property, the gate audit chain: where it's enforced in code, in the worker loop, and in the spec; what artifact carries the evidence.
+- `system-models/reports/planning-reconciliation.md` — per-property cross-source consistency table (model ↔ code ↔ skills ↔ schema), threat model, boundary review.
+- `system-models/reports/planning-enforcement.md` — for each verified property, the gate audit chain across model / code / skill texts / integration tests, plus the storage-layer gate-artifact check.
+- `system-models/reports/alloy-dafny-reconciliation.md` — Alloy ↔ Dafny coverage diff (which properties live in which formalism, and which Alloy-only layers haven't been ported yet).
+- `system-models/reports/planning-blind-spots.md` — known modeling gaps and open design questions.
+- `system-models/reports/cache-staleness-investigation.md` — historical artifact: the pre-migration claim-race investigation that motivated the move to `chain_predecessor`. Kept for context, not a current-state document.
 
 ## Acknowledgments
 
