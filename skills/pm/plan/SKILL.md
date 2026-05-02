@@ -33,6 +33,14 @@ description: >
     or `superseded`. These statuses never become `done`, so the new
     task would block on the queue forever. (Use `pm replan` to revive
     a rejected dep first, or omit the dep.)
+- `--sticky` — bind the task's TaskStatus chain to whichever agent
+  context first claims it. Subsequent claims, reports, heartbeats,
+  and finishes against this task — and any sticky descendants in its
+  parent / dependency chain — must come from the same
+  `$PM_CONTEXT_ID` (or `--context-id` flag); mismatches refuse with
+  exit 10 (`StickyContextMismatch`). Subtasks via `--parent` inherit
+  sticky automatically. See "Clustering work by agent" below for
+  when and how to use this.
 - `--verifier <spec>` — optional gate that `pm finished` runs before
   allowing the done transition. Forms:
   - **`skill:<skill-name>`** — *self-attestation* (default for
@@ -73,6 +81,104 @@ description: >
    `../scripts/pm plan --title "..." --text "..." [--queue Q] [--parent SHA] [--depends-on SHA,SHA]`
 3. Output is `{ "task": ..., "status": ... }` — record `task.text_sha256`;
    it is the identifier used by the other planning skills.
+
+## Clustering work by agent
+
+When several tasks share an expensive resource (a set of files, a
+compiled artifact, a large in-context dataset, an open browser
+session), you usually want **one agent to do them all** rather than
+have N agents each pay the load cost. The planning board makes this
+explicit through three patterns; pick by the shape of the sharing.
+
+### Pattern A — sticky cluster with a parent (recommended for shared reads)
+
+Plan a sticky **cluster parent** whose body lists the shared
+resource (file paths, chunk ids, repo URL, model name, etc.), then
+plan each item as a `--parent` subtask:
+
+```bash
+PARENT=$(pm plan --queue Q --title "Cluster N: chunks 88-91,98" \
+                 --text "Shared chunks: 88, 89, 90, 91, 98" \
+                 --sticky | jq -r .task.text_sha256)
+
+pm plan --queue Q --title "Item A" --text "..." --parent "$PARENT"
+pm plan --queue Q --title "Item B" --text "..." --parent "$PARENT"
+pm plan --queue Q --title "Item C" --text "..." --parent "$PARENT"
+```
+
+Because the parent is sticky and subtasks **inherit sticky from the
+parent automatically**, the first worker to claim the parent (with
+its own `PM_CONTEXT_ID`) binds the whole cluster to that context;
+any other worker's claim on a sibling refuses with exit 10. The
+bound worker reads the shared resource once into its own context
+and drains the cluster from there. Other workers naturally route to
+*other* clusters via `pm next`.
+
+### Pattern B — sticky chain via dependsOn (sequential reuse)
+
+When tasks share resources AND must run in order, use sticky tasks
+linked by `--depends-on`. Sticky propagates across the dep chain
+the same way it propagates across `parent`:
+
+```bash
+A=$(pm plan ... --sticky | jq -r .task.text_sha256)
+B=$(pm plan ... --sticky --depends-on $A | jq -r .task.text_sha256)
+C=$(pm plan ... --sticky --depends-on $B | jq -r .task.text_sha256)
+```
+
+The first agent to claim A binds the chain; B and C will only be
+claimable by the same context once their deps complete.
+
+### Pattern C — non-sticky singletons
+
+When a task has no expensive shared read with any other task, leave
+`--sticky` off. It rides the standard `pm next` pull path — any
+free agent can claim it. Mixing singletons with clusters in the
+same queue is fine; the dispatch happens per-task.
+
+### Matching a context_id to a cluster you've already identified
+
+If you've **already done** the cluster analysis (e.g., from a
+similarity computation or a chunk-overlap matrix) and want to dispatch
+work with deterministic agent-to-cluster mapping rather than
+first-come-first-bind:
+
+1. Mint one context-id per cluster up front:
+   `CLUSTER_5_CTX=$(pm context-id)`
+2. Have the worker assigned to that cluster pass it explicitly via
+   the new `--context-id` flag (or set `PM_CONTEXT_ID` in the
+   subprocess env). Use `--context-id` rather than the env var to
+   avoid scope drift across nested subshells:
+   ```bash
+   pm executing --task "$PARENT" --context-id "$CLUSTER_5_CTX"
+   pm executing --task "$SUB_A"  --context-id "$CLUSTER_5_CTX"
+   pm report     --task "$SUB_A" --context-id "$CLUSTER_5_CTX" --title r --text x
+   pm finished   --task "$SUB_A" --context-id "$CLUSTER_5_CTX"
+   ```
+3. The first claim binds; all subsequent claims with the same
+   context-id succeed; any other agent's claims refuse with exit 10.
+
+This **maps your cluster identity onto the planning board's context
+identity 1:1**, so the dashboard's `ctx:` tag corresponds directly
+to your cluster number — useful for debugging and reporting.
+
+### Anti-pattern: minting a fresh context-id per claim
+
+Do NOT call `pm context-id` inside the per-task loop:
+
+```bash
+# WRONG — produces N distinct ctx values for one agent's work
+for task in $tasks; do
+  CTX=$(pm context-id)         # fresh UUID each iteration
+  pm executing --task $task --context-id $CTX
+done
+```
+
+Each claim ends up in its own one-task "cluster". Sticky still
+works structurally (no double-claims), but the dashboard's `ctx:`
+tags become uninformative and you lose the ability to reason about
+"which agent did which cluster". Mint one context-id per worker (or
+per cluster, per Pattern C) and reuse it.
 
 ## Exit codes
 
