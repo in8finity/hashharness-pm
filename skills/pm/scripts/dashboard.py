@@ -23,7 +23,7 @@ import sys
 from collections import defaultdict
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse, parse_qs
 
 import mcp_client
 import store
@@ -133,6 +133,13 @@ h3 {{ font-size: 1em; margin: 0.4em 0 0.3em; color: #555; }}
 .tag-deps {{ background: #f3e5f5; color: #491b75; }}
 .tag-owner {{ background: #f5f5f5; color: #333; font-family: monospace; }}
 .tag-ctx {{ background: #fff8e1; color: #6a5400; font-family: monospace; }}
+.filters {{ background: #fff; border: 1px solid #ddd; padding: 0.5em 0.8em; border-radius: 4px; margin-bottom: 0.6em; display: flex; flex-wrap: wrap; gap: 0.6em; align-items: center; }}
+.filters label {{ display: flex; align-items: center; gap: 0.3em; font-size: 0.88em; color: #444; }}
+.filters select, .filters input {{ font-family: inherit; font-size: 0.88em; padding: 0.15em 0.3em; border: 1px solid #ccc; border-radius: 3px; background: #fafafa; }}
+.filters select {{ max-width: 28em; }}
+.filters button {{ padding: 0.2em 0.8em; border: 1px solid #1976d2; background: #1976d2; color: white; border-radius: 3px; cursor: pointer; font-size: 0.88em; }}
+.filters button:hover {{ background: #1565c0; }}
+.filters .clear {{ font-size: 0.85em; color: #888; margin-left: 0.4em; }}
 .totals {{ background: #fff; border: 1px solid #ddd; padding: 0.5em 0.8em; border-radius: 4px; margin-bottom: 1em; }}
 .totals .status {{ margin-right: 0.4em; }}
 .empty {{ color: #888; font-style: italic; }}
@@ -177,18 +184,124 @@ def _render_task(task: dict, children_of: dict, depth: int = 0) -> list[str]:
     return out
 
 
-def render_html(state: dict, refresh: int) -> str:
+STATUS_OPTIONS = ["new", "working", "done", "rejected", "superseded", "?"]
+
+
+def parse_filters(query: str) -> dict:
+    """Parse ?wd=...&q=...&status=...&search=... into a filter spec."""
+    qs = parse_qs(query, keep_blank_values=False)
+    return {
+        "workdir": (qs.get("wd") or [""])[0].strip(),
+        "queue":   (qs.get("q")  or [""])[0].strip(),
+        "status":  (qs.get("status") or [""])[0].strip(),
+        "search":  (qs.get("search") or [""])[0].strip(),
+    }
+
+
+def task_matches(task: dict, filters: dict) -> bool:
+    """Test if a task survives the filter spec. Empty filter values match all."""
+    if filters["status"] and task["status"] != filters["status"]:
+        return False
+    if filters["search"]:
+        needle = filters["search"].lower()
+        haystack = (
+            task["slug"].lower()
+            + " " + (task.get("title") or "").lower()
+            + " " + task["sha"].lower()
+            + " " + (task.get("verifier") or "").lower()
+            + " " + (task.get("owner") or "").lower()
+        )
+        if needle not in haystack:
+            return False
+    return True
+
+
+def apply_filters(state: dict, filters: dict) -> dict:
+    """Return a new state with workdirs/queues/tasks filtered. Preserves
+    structure so the render path stays identical."""
+    out_workdirs: dict[str, dict[str, list[dict]]] = {}
+    by_status: dict[str, int] = defaultdict(int)
+    total = 0
+    for wd, queues in state["workdirs"].items():
+        if filters["workdir"] and wd != filters["workdir"]:
+            continue
+        kept_queues: dict[str, list[dict]] = {}
+        for q, tasks in queues.items():
+            if filters["queue"] and q != filters["queue"]:
+                continue
+            kept = [t for t in tasks if task_matches(t, filters)]
+            if kept:
+                kept_queues[q] = kept
+                for t in kept:
+                    by_status[t["status"]] += 1
+                    total += 1
+        if kept_queues:
+            out_workdirs[wd] = kept_queues
+    return {
+        "workdirs": out_workdirs,
+        "totals": {"tasks": total, "by_status": dict(by_status)},
+    }
+
+
+def render_filter_form(state: dict, filters: dict) -> str:
+    """The filter bar at the top. Dropdowns populated from live state."""
+    workdirs = sorted(state["workdirs"].keys())
+    queues_set: set[str] = set()
+    for q_map in state["workdirs"].values():
+        queues_set.update(q_map.keys())
+    queues = sorted(queues_set)
+
+    def opt(value: str, current: str) -> str:
+        sel = ' selected' if value == current else ''
+        label = escape(value) if value else "(any)"
+        return f'<option value="{escape(value)}"{sel}>{label}</option>'
+
+    wd_opts = opt("", filters["workdir"]) + "".join(
+        opt(wd, filters["workdir"]) for wd in workdirs
+    )
+    q_opts = opt("", filters["queue"]) + "".join(
+        opt(q, filters["queue"]) for q in queues
+    )
+    st_opts = opt("", filters["status"]) + "".join(
+        opt(s, filters["status"]) for s in STATUS_OPTIONS
+    )
+
+    search_val = escape(filters["search"])
+    return f'''<form class="filters" method="get" action="/">
+  <label>workdir <select name="wd">{wd_opts}</select></label>
+  <label>queue <select name="q">{q_opts}</select></label>
+  <label>status <select name="status">{st_opts}</select></label>
+  <label>search <input type="text" name="search" value="{search_val}" placeholder="slug / title / sha / verifier / owner" size="32"></label>
+  <button type="submit">apply</button>
+  <a href="/" class="clear">clear</a>
+</form>'''
+
+
+def render_html(state: dict, refresh: int, filters: dict | None = None,
+                full_state: dict | None = None) -> str:
+    """`state` is the (possibly filtered) snapshot rendered as the body.
+    `full_state` is the unfiltered snapshot used to populate filter dropdowns.
+    `filters` carries the current filter values (for form pre-population)."""
+    filters = filters or {"workdir": "", "queue": "", "status": "", "search": ""}
+    full_state = full_state or state
+
     pieces = [HTML_HEAD.format(refresh=refresh)]
 
-    # Totals bar.
+    # Filter form.
+    pieces.append(render_filter_form(full_state, filters))
+
+    # Totals bar — reflects the filtered view.
     total = state["totals"]["tasks"]
-    parts = [f"<strong>Total tasks:</strong> {total}"]
+    full_total = full_state["totals"]["tasks"]
+    parts = [f"<strong>Showing:</strong> {total}"]
+    if total != full_total:
+        parts[0] += f' <span class="sha">of {full_total}</span>'
     for st, n in sorted(state["totals"]["by_status"].items()):
         parts.append(f'<span class="status status-{escape(st)}">{escape(st)}: {n}</span>')
     pieces.append(f'<div class="totals">{" ".join(parts)}</div>')
 
     if not state["workdirs"]:
-        pieces.append('<p class="empty">(no tasks in any queue)</p>')
+        pieces.append('<p class="empty">(no tasks match the current filter)</p>')
 
     for workdir in sorted(state["workdirs"].keys()):
         queues = state["workdirs"][workdir]
@@ -225,17 +338,27 @@ class Handler(BaseHTTPRequestHandler):
     refresh_seconds = 5
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         try:
             if path == "/api/state":
-                state = fetch_state()
-                body = json.dumps(state, indent=2, default=str).encode("utf-8")
+                full_state = fetch_state()
+                # /api/state honours filters too — useful for scripted scrapes.
+                filters = parse_filters(parsed.query)
+                state = apply_filters(full_state, filters) if any(filters.values()) else full_state
+                payload = {"filters": filters, **state} if any(filters.values()) else state
+                body = json.dumps(payload, indent=2, default=str).encode("utf-8")
                 self._respond(200, "application/json", body)
             elif path == "/healthz":
                 self._respond(200, "text/plain", b"ok")
             elif path in ("/", "/index.html"):
-                state = fetch_state()
-                body = render_html(state, self.refresh_seconds).encode("utf-8")
+                full_state = fetch_state()
+                filters = parse_filters(parsed.query)
+                state = apply_filters(full_state, filters) if any(filters.values()) else full_state
+                body = render_html(
+                    state, self.refresh_seconds,
+                    filters=filters, full_state=full_state,
+                ).encode("utf-8")
                 self._respond(200, "text/html; charset=utf-8", body)
             else:
                 self._respond(404, "text/plain", b"not found")
