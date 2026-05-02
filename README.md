@@ -200,6 +200,23 @@ Both race conditions are content-addressed gates inside hashharness: slug unique
 
 `pm plan` itself can also exit 4 (slug already taken in this queue). `pm execute` (the `pm-execute` skill) spawns N agents in parallel running this loop.
 
+## Task verifiers (post-execution gates)
+
+A Task can declare a `--verifier` at plan time. When a worker calls `pm finished`, the verifier runs against the latest TaskReport before the `done` transition is allowed. Non-zero verifier exit blocks the close and leaves the task in `working` (`pm finished` exits 9). `--rejected` bypasses the verifier — rejecting work doesn't claim success, so the gate isn't load-bearing on that path. `--skip-verifier` is the documented escape hatch (records `verifier_exit = -1` on the closing status, so the bypass is auditable).
+
+Four forms of `--verifier <spec>`:
+
+| Form | Who applies the criterion | When `pm finished` runs |
+|---|---|---|
+| **`skill:NAME`** *(self-attestation, default for skill-based checks)* | the worker | parses a `## Verifier Attestation` block embedded in the TaskReport (fields: `verifier:` matching the spec verbatim, `verdict: PASS\|FAIL[: reason]`, `evidence:`) and gates on the verdict. **No subprocess spawn** — the worker is contractually responsible for actually running the skill. |
+| **`prompt:CRITERION`** *(self-attestation with free-form criterion)* | the worker | same attestation contract as `skill:`, just with arbitrary criterion text. |
+| **`verify-skill:NAME`** / **`verify-prompt:CRITERION`** *(opt-in, independent re-judgment)* | a fresh `claude -p` subprocess that `pm finished` spawns | independently re-checks the task body + report against the skill / criterion. Higher cost; useful when self-attestation isn't trusted enough. The LLM must terminate output with `VERDICT: PASS` or `VERDICT: FAIL: <reason>`. Requires the `claude` CLI on PATH (else exit 127). |
+| **`<absolute path>`** (or shell-prefixed: `env FOO=bar /path/to/check.sh`) | a subprocess spawned by `pm finished` | receives env `PM_TASK`, `PM_REPORT_SHA`, `PM_QUEUE`, `PM_SLUG`, `PM_VERIFIER` plus positional `<task-sha> <report-sha>`. Exit 0 = pass; non-zero = fail; verifier_summary captures stdout + stderr (truncated). |
+
+The verifier outcome (command, exit code, summary, timeout flag) is recorded as attributes on the closing `TaskStatus(done)` — the audit chain documents who checked the work and what they observed. The same attributes ride along on `--skip-verifier` close-outs (with `verifier_exit = -1`) so a downstream auditor can spot bypasses.
+
+Three formal properties cover this surface (see `system-models/planning.als` and `planning.dfy`): `VerifierGateOnDone` (verifier-required tasks can't reach `done` without `verifierPassed`), `VerifyRequiresWorkingReport` (verify only fires on a working task that has a report), and the storage-level audit chain (`finished.py` writes `extra_attrs.update(result)` before `append_status` so the verdict is on the closing status itself). The integration suite covers all three forms: G3 (skill attestation happy path), G3b (missing attestation → exit 9), G10 (shell-script verifier exit 1 → exit 9).
+
 ## Threat model
 
 The formal model verifies the protocol assuming every state transition goes through `pm`. A client writing directly to hashharness via MCP can bypass most assertions (state-machine ordering, proof-of-work, dep gate, sticky-context check, verifier gate). What survives a bypass is the storage layer: item immutability, schema link types, link-target existence, `text_sha256` uniqueness on the canonical slug key, and `chain_predecessor` head-move enforcement on `prevStatus` / `prevReport` / `prevHeartbeat` (so even a bypass can't double-claim or fork a chain).
