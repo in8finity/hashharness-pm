@@ -19,8 +19,10 @@ Last updated: 2026-05-02
 | Dafny | `planning_plan_race.dfy` | 5/5 lemmas proved |
 | Dafny | `planning_replan.dfy` | **11/11 lemmas proved** (new this session — R1–R8 + Inv preservation) |
 | Dafny | `planning_lease.dfy` | **10/10 lemmas proved** (new this session — SingleOwner, LiveWorkerActions, ProofRequiredForTerminal, NoZombieAfterReclaim, ReclaimRequiresStableHeartbeatChain, LiveHeartbeatBlocksReclaim, HbSinceObsClearedOnlyByObserveOrClaim + Inv preservation) |
+| Dafny | `planning_cancel_cascade.dfy` | **24 verified** (new this session — CC1–CC6 + Inv preservation + helpers) |
+| Dafny | `planning_reclaim_cascade.dfy` | **25 verified** (new this session — RC1–RC6 + Inv preservation + helpers) |
 
-Alloy total: **40/40 checks pass.** Dafny total: **45/45 lemmas pass** (planning 19 + plan_race 5 + replan 11 + lease 10).
+Alloy total: **40/40 checks pass.** Dafny total: **94 verified** across six .dfy files (planning 19 lemmas + plan_race 5 + replan 11 + lease 10 + cancel_cascade 24 + reclaim_cascade 25).
 
 The chain_predecessor migration was mechanism-agnostic — neither model needed structural change because both abstract claim-race resolution as `commitClaim | abortClaim`, leaving the storage-level enforcement detail under the abstraction. The lease-model extension this session (heartbeat-vs-reclaim race) added two new safety properties to Alloy and is the third Alloy-only family that hasn't been ported to Dafny.
 
@@ -47,10 +49,10 @@ The chain_predecessor migration was mechanism-agnostic — neither model needed 
 | **Lease / reclaim safety** (`Alive` + crash + reclaim) | `planning_lease.als`: `SingleOwner`, `LiveWorkerActions`, `NoZombieAfterReclaim` | `planning_lease.dfy`: same three lemmas + Inv preservation | **Yes** ✓ (closed this session) |
 | **Heartbeat-vs-reclaim race** | `planning_lease.als`: `LiveHeartbeatBlocksReclaim`, `ReclaimRequiresStableHeartbeatChain` (+ `HbSinceObs` flag, `heartbeat`/`sweepObserve` transitions) | `planning_lease.dfy`: both named lemmas + `HbSinceObsClearedOnlyByObserveOrClaim` (auxiliary case-analysis) | **Yes** ✓ (closed this session) |
 | **Replan semantics** (4 modes) | `planning_replan.als`: 8 properties (R1–R8) | `planning_replan.dfy`: same 8 properties as named lemmas (+Inv preservation +InvAlwaysHolds +R5 helper) | **Yes** ✓ (closed this session) |
-| **Cancel cascade correctness** (new) | `planning_cancel_cascade.als`: 6 properties (CC1–CC6 covering parent-reverse closure, terminal preservation, non-descendant isolation, refusal on absorbing root) | **NOT MODELED** | **No — Alloy ahead, no Dafny cascade port exists** |
-| **Reclaim cascade correctness** (new) | `planning_reclaim_cascade.als`: 6 properties (RC1–RC6 covering working-only release, new/terminal preservation, parent-transitive walk, non-descendant isolation, refusal on non-working root) | **NOT MODELED** | **No — Alloy ahead, no Dafny cascade port exists** |
+| **Cancel cascade correctness** | `planning_cancel_cascade.als`: 6 properties (CC1–CC6) | `planning_cancel_cascade.dfy`: same 6 properties as named lemmas + Inv preservation. Transitive closure represented as caller-supplied `descendants` parameter with a soundness predicate (matches the runtime DFS). | **Yes** ✓ (closed this session) |
+| **Reclaim cascade correctness** | `planning_reclaim_cascade.als`: 6 properties (RC1–RC6) | `planning_reclaim_cascade.dfy`: same 6 properties as named lemmas + Inv preservation. Same caller-supplied closure approach. | **Yes** ✓ (closed this session) |
 
-**Aligned: 19/20 shared properties** (was 13/20). Closed this session: cycle/self-loop refusal precondition, `CancelledIsRejectedTerminal`, **replan semantics** (`planning_replan.dfy`), **sticky context** (extended `planning.dfy`), and **lease + heartbeat-race** (`planning_lease.dfy`). Two Alloy-only families remain: cancel-cascade correctness and reclaim-cascade correctness — both blocked on a Dafny transitive-closure helper, which is doable but more complex than the other ports.
+**All 20/20 shared properties Aligned** (was 13/20). Closed this session, in order: cycle/self-loop refusal precondition, `CancelledIsRejectedTerminal`, **replan semantics** (`planning_replan.dfy`), **sticky context** (extended `planning.dfy`), **lease + heartbeat-race** (`planning_lease.dfy`), **cancel-cascade correctness** (`planning_cancel_cascade.dfy`), and **reclaim-cascade correctness** (`planning_reclaim_cascade.dfy`). The cascade ports use a caller-supplied `descendants` parameter with a soundness predicate (`ValidDescendantsSet`) that captures parent-reverse closedness — the runtime computes the closure via DFS, the model abstracts it into the precondition. **No Alloy-only families remain.**
 
 ## Discrepancies
 

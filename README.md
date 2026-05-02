@@ -117,6 +117,8 @@ hashharness-pm/
 │   ├── planning_plan_race.dfy       # Dafny port of planning_plan_race.als
 │   ├── planning_replan.dfy          # Dafny port of planning_replan.als (R1-R8 unbounded)
 │   ├── planning_lease.dfy           # Dafny port of planning_lease.als (lease + heartbeat-race unbounded)
+│   ├── planning_cancel_cascade.dfy  # Dafny port of planning_cancel_cascade.als (CC1-CC6 unbounded)
+│   ├── planning_reclaim_cascade.dfy # Dafny port of planning_reclaim_cascade.als (RC1-RC6 unbounded)
 │   ├── model-isomorphism-check.md   # mapping note for related agent frameworks
 │   └── reports/
 │       ├── planning-reconciliation.md       # model ↔ code/skills cross-source audit
@@ -222,6 +224,8 @@ bash $verify system-models/planning.dfy            # 14 lemmas + 23 functions
 bash $verify system-models/planning_plan_race.dfy  # 5 lemmas
 bash $verify system-models/planning_replan.dfy     # 11 lemmas (R1-R8 + Inv preservation)
 bash $verify system-models/planning_lease.dfy      # 10 lemmas (lease + heartbeat-race)
+bash $verify system-models/planning_cancel_cascade.dfy   # 6 properties + helpers
+bash $verify system-models/planning_reclaim_cascade.dfy  # 6 properties + helpers
 ```
 
 To reproduce the historical slug-race counterexample, swap `commitPlan[p]` for `commitPlanBuggy[p]` in `planning_plan_race.als`'s `Transitions` fact and re-run; the counterexample re-appears in 4 steps.
