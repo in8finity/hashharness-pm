@@ -22,8 +22,8 @@ For each verified-aligned property in `planning-reconciliation.md`, this report 
 | `StickyChainCoherence` / `StickyBindingOnlyAtClaim` | `store.check_sticky_eligibility` invoked from `executing.py`/`heartbeat.py`/`report.py`/`finished.py`; refusal exit 10. | `pm-executing/SKILL.md` documents sticky path; broader semantics in `store.py` docstrings | `G8` exhaustively covers claim binds context, wrong-context report/finished → exit 10, right-context succeeds | **Enforced** at all four layers |
 | `CancelledIsRejectedTerminal` / `CancelOnlyOnNonTerminal` / `CancelledHasProof` | `cancel.py` refuses on terminal; `store.cancel_task` synthesizes report + rejected status via `append_status` (so closing status passes through chain_predecessor). | `pm-cancel/SKILL.md` documents `--cascade` and synthetic-report-as-proof | `G11` (cascade success), `G17` (refusal of cancel-on-done) | **Enforced** at all four layers |
 | Reclaim safety: dead worker is recoverable | `sweep.py` reclaims past TTL; `store.reclaim` appends `new` with `reclaimed=true`. | `pm-cancel/SKILL.md` mentions reclaim/sweep; sweep doc inline | `G13` (sweep --ttl 1 reclaims dormant claim), `G12` (cascade reclaim sticky) | **Enforced** at all four layers |
-| **Heartbeat-vs-reclaim race** (new this session) | `sweep.py` snapshots heartbeat tip; `store.reclaim(preempt_heartbeat=True, …)` writes preempt heartbeat first; `chain_predecessor` on `prevHeartbeat` rejects if a worker raced → `WorkerStillAlive` → sweep aborts. | (No SKILL.md yet — operator-facing concept lives in `sweep.py` docstring + `pm sweep --help`) | `G20` (race lost → worker survives), `G21` (no-race → sweep wins) | **Enforced (code + tests)**, **Missing-from-gate (skills)** |
-| **Zombie heartbeat refusal** (new this session) | `heartbeat.py`: `if owner != args.agent: return 12`. **Imperative.** | `heartbeat.py` docstring is the canonical operator-facing text; no separate SKILL.md exists | `G22` (A claims → reclaimed → B re-claims → zombie A heartbeat → exit 12) | **Enforced (code + tests)**, **Missing-from-gate (skills — no heartbeat SKILL.md exists)** |
+| **Heartbeat-vs-reclaim race** (new this session) | `sweep.py` snapshots heartbeat tip; `store.reclaim(preempt_heartbeat=True, …)` writes preempt heartbeat first; `chain_predecessor` on `prevHeartbeat` rejects if a worker raced → `WorkerStillAlive` → sweep aborts. | `pm-sweep/SKILL.md` documents the preempt protocol + the operational caveat (heartbeat interval < TTL). **Imperative.** | `G20` (race lost → worker survives), `G21` (no-race → sweep wins) | **Enforced** at all four layers |
+| **Zombie heartbeat refusal** (new this session) | `heartbeat.py`: `if owner != args.agent: return 12`. **Imperative.** | `pm-heartbeat/SKILL.md` documents exit 12 + the agent-match contract. **Imperative.** | `G22` (A claims → reclaimed → B re-claims → zombie A heartbeat → exit 12) | **Enforced** at all four layers |
 | Schema head race (`set_schema` ordering) | `setup_schema.py` passes `expected_prev` from `get_schema_history`; concurrent set_schema rejected with 'schema head moved'. | (deployment-time, no SKILL.md) | **No test** — `setup_schema.py` is one-shot, rarely concurrent | **Enforced (code)**, **Missing-from-gate (skills + tests)** — acceptable given operational rarity |
 
 ## Gate artifact check (storage-layer)
@@ -50,10 +50,7 @@ All audited gates have a complete artifact chain.
 **13/13 properties Enforced** with imperative language at the decision point. Two new gates added this session — preempt-heartbeat (claim race protection across types) and heartbeat owner-check (zombie refusal) — each landed with a structurally faithful implementation.
 
 ### Skill texts layer
-**11/13 properties** have explicit gate prose with imperative language at the canonical SKILL.md (refuses/exits/etc). Two gaps remain:
-
-1. **Heartbeat-vs-reclaim race** — no SKILL.md describes the preempt mechanism (operator concern in `sweep.py` docstring + `pm sweep --help`). Worth surfacing in a `pm-sweep/SKILL.md` if operators routinely tune TTL.
-2. **Zombie heartbeat refusal** — `heartbeat.py` is the only operator-facing text; no `pm-heartbeat/SKILL.md` exists. Heartbeat is a worker-loop concern that today only appears via `pm heartbeat`; a SKILL.md would help if heartbeats become a more discoverable surface.
+**13/13 properties** have explicit gate prose with imperative language at the canonical SKILL.md. The previous two gaps (heartbeat-vs-reclaim race, zombie heartbeat refusal) were closed by adding `pm-sweep/SKILL.md` and `pm-heartbeat/SKILL.md`.
 
 ### Tests layer
 **12/13 properties** have direct test coverage (G2, G3, G3b, G6, G8, G9, G10, G11, G12, G13, G14, G16, G17, G18, G19, G20, G21, G22). One gap:
@@ -64,12 +61,11 @@ All audited gates have a complete artifact chain.
 
 | Action | Layer | Effort | Value |
 |---|---|---|---|
-| Add a `pm-sweep/SKILL.md` describing the TTL setting and the preempt-heartbeat protocol | Skills | 15 min | Surfaces the operational caveat (heartbeat interval < TTL) |
-| (Optional) Add `pm-heartbeat/SKILL.md` documenting exit 12 + agent-match contract | Skills | 10 min | Discoverability for the zombie-heartbeat gate |
+| (None left for the load-bearing layers.) The remaining open items are modeling-debt rather than enforcement gaps — see `planning-reconciliation.md`'s "Remaining gaps (modeling debt)" section. | — | — | — |
 
 ## Verdict
 
-**13/13 model-verified properties remain enforced** at the code layer with structural or imperative gates. Skill-text coverage trails the code by three additions (all Mentioned-but-thin, none Missing-from-gate at the load-bearing layer). Test coverage now spans 12/13 properties via 23 golden flows.
+**13/13 model-verified properties remain enforced** at the code layer with structural or imperative gates. **13/13 also have imperative skill-text coverage** after the addition of `pm-sweep/SKILL.md` and `pm-heartbeat/SKILL.md`. Test coverage spans 12/13 properties via 23 golden flows (the schema-head race remains the one untested-by-design item).
 
 The two new safety holes addressed this session — heartbeat-vs-reclaim race and zombie-heartbeat refusal — landed with paired model properties (`LiveHeartbeatBlocksReclaim`, `ReclaimRequiresStableHeartbeatChain`), structural code gates (chain_predecessor on `prevHeartbeat`, agent-match check), and direct integration tests (G20, G21, G22). The cycle/dep validation closure (G18, G19) similarly landed end-to-end.
 
