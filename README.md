@@ -206,41 +206,72 @@ The formal model verifies the protocol assuming every state transition goes thro
 
 For cooperative-agent usage (the actual use case), convention is sufficient. See `system-models/reports/planning-reconciliation.md#threat-model` for hardening options if adversarial bypass becomes a concern.
 
-## Re-running the model
+## Verifying the models
+
+The repo carries **seven Alloy modules** and **six Dafny ports** of the planning protocol. They're verified with the [`formal-modeling`](https://github.com/in8finity/claude-plugin) skill's bundled `verify.sh` runner — a single dispatcher that routes `.als` files through Alloy 6 and `.dfy` files through Dafny + Z3, with output formatters that surface per-check / per-lemma results.
+
+### What you need
+
+The `verify.sh` script is an unified runner with auto-setup:
+
+- **`.als` files** — needs Java 17+ JDK (or falls back to Docker `eclipse-temurin:17-jdk` if no local Java). First run downloads Alloy 6 (~20 MB) and caches under `.alloy/` next to the script.
+- **`.dfy` files** — needs `dafny` on PATH (`brew install dafny` on macOS — bundles Z3). The runner pipes Dafny output through a per-lemma formatter showing pass/fail + timing.
+- **`python3`** — for output formatters (both Alloy and Dafny).
+
+Install the formal-methods plugin via Claude Code:
 
 ```bash
-# Bring the formal-methods skill's runner along:
+claude plugin install morozov-claude-plugin
+# verify.sh ends up at:
+#   ~/.claude/plugins/cache/morozov-claude-plugin/formal-methods/<version>/skills/formal-modeling/scripts/verify.sh
+```
+
+Or run Alloy/Dafny directly if you'd rather not depend on the plugin (`alloy` JAR + `dafny verify`). The repo's models are vanilla Alloy 6 / Dafny — no Claude-specific bindings.
+
+### Re-running everything
+
+```bash
 verify=~/.claude/plugins/cache/morozov-claude-plugin/formal-methods/1.3.0/skills/formal-modeling/scripts/verify.sh
 
 # Alloy (bounded counterexamples + scenarios)
-bash $verify system-models/planning.als            # 13 checks, 11 SAT runs + 2 expected-UNSAT
-bash $verify system-models/planning_lease.als      # 6 checks, 5 SAT runs + 2 expected-UNSAT
-bash $verify system-models/planning_plan_race.als  # 1 check, 1 expected-UNSAT
-bash $verify system-models/planning_replan.als     # 8 checks, 4 SAT runs + 2 expected-UNSAT
-bash $verify system-models/planning_cancel_cascade.als  # 6 checks, 3 SAT runs + 1 expected-UNSAT
-bash $verify system-models/planning_reclaim_cascade.als # 6 checks, 3 SAT runs + 2 expected-UNSAT
-bash $verify system-models/planning_isolation.als       # 7 checks, 3 SAT runs + 2 expected-UNSAT (static)
+bash $verify system-models/planning.als                  # 13 checks, 11 SAT runs + 2 expected-UNSAT
+bash $verify system-models/planning_lease.als            # 6 checks, 5 SAT runs + 2 expected-UNSAT
+bash $verify system-models/planning_plan_race.als        # 1 check, 1 expected-UNSAT
+bash $verify system-models/planning_replan.als           # 8 checks, 4 SAT runs + 2 expected-UNSAT
+bash $verify system-models/planning_cancel_cascade.als   # 6 checks, 3 SAT runs + 1 expected-UNSAT
+bash $verify system-models/planning_reclaim_cascade.als  # 6 checks, 3 SAT runs + 2 expected-UNSAT
+bash $verify system-models/planning_isolation.als        # 7 checks, 3 SAT runs + 2 expected-UNSAT (static)
 
 # Dafny (unbounded inductive proofs over the same protocol)
-bash $verify system-models/planning.dfy            # 14 lemmas + 23 functions
-bash $verify system-models/planning_plan_race.dfy  # 5 lemmas
-bash $verify system-models/planning_replan.dfy     # 11 lemmas (R1-R8 + Inv preservation)
-bash $verify system-models/planning_lease.dfy      # 10 lemmas (lease + heartbeat-race)
-bash $verify system-models/planning_cancel_cascade.dfy   # 6 properties + helpers
-bash $verify system-models/planning_reclaim_cascade.dfy  # 6 properties + helpers
+bash $verify system-models/planning.dfy                  # 19 lemmas + 28 functions (sticky-extended)
+bash $verify system-models/planning_plan_race.dfy        # 5 lemmas
+bash $verify system-models/planning_replan.dfy           # 11 lemmas (R1-R8 + Inv preservation)
+bash $verify system-models/planning_lease.dfy            # 10 lemmas (lease + heartbeat-race)
+bash $verify system-models/planning_cancel_cascade.dfy   # CC1-CC6 (24 verified)
+bash $verify system-models/planning_reclaim_cascade.dfy  # RC1-RC6 (25 verified)
 ```
 
+**Totals**: Alloy **47/47 checks**; Dafny **94 verified** across 6 files. Cross-formalism: **20/20** shared properties Aligned (see `system-models/reports/alloy-dafny-reconciliation.md`).
+
 To reproduce the historical slug-race counterexample, swap `commitPlan[p]` for `commitPlanBuggy[p]` in `planning_plan_race.als`'s `Transitions` fact and re-run; the counterexample re-appears in 4 steps.
+
+### Why two formalisms
+
+- **Alloy** — bounded model checker. Generates concrete counterexamples within a scope (`for 4 but 8 steps`), excellent for design exploration and showing stakeholders "here's the trace where the system breaks." Fast iteration; visual.
+- **Dafny** — inductive theorem prover over Z3. Proves properties for traces of *any length*. Slower to write but stronger guarantee — once a Dafny lemma passes, no scope-exhaustion concern. Great for "this assertion is now CI-grade." Doesn't generate counterexamples; you have to know the property you want.
+
+The convention in this repo: **Alloy first** (find the right property, see counterexamples, validate scope), then **port to Dafny** for unbounded confidence. The seven Alloy modules and six Dafny ports both verify the same surface; the cross-formalism table tracks which lives where.
 
 ## Reports
 
 - `system-models/reports/planning-reconciliation.md` — per-property cross-source consistency table (model ↔ code ↔ skills ↔ schema), threat model, boundary review.
 - `system-models/reports/planning-enforcement.md` — for each verified property, the gate audit chain across model / code / skill texts / integration tests, plus the storage-layer gate-artifact check.
 - `system-models/reports/alloy-dafny-reconciliation.md` — Alloy ↔ Dafny coverage diff (which properties live in which formalism, and which Alloy-only layers haven't been ported yet).
+- `system-models/reports/alloy-cross-model-soundness.md` — pairwise check across the seven Alloy modules: do they contradict each other where scopes overlap, or sit as consistent specializations? (Spoiler: sound, with one documented scope gap on `TerminalAbsorbing` × `replan_reset`.)
 - `system-models/reports/planning-blind-spots.md` — known modeling gaps and open design questions.
 - `system-models/reports/cache-staleness-investigation.md` — historical artifact: the pre-migration claim-race investigation that motivated the move to `chain_predecessor`. Kept for context, not a current-state document.
 
 ## Acknowledgments
 
 - [hashharness](https://github.com/in8finity/hashharness) — append-only text store with MCP server.
-- The Alloy 6 model and reports were produced by the [`formal-modeling`](https://github.com/in8finity/claude-plugin) skill.
+- The Alloy 6 models, Dafny ports, and audit reports were produced and verified using the [`formal-modeling`](https://github.com/in8finity/claude-plugin) skill — its bundled `verify.sh` runner handles both `.als` (Alloy 6) and `.dfy` (Dafny + Z3) with auto-setup of the underlying solvers.
