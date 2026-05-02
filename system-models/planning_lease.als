@@ -52,10 +52,21 @@ var sig Alive     in Agent {}
 var sig HasReport in Task  {}
 var sig HasProof  in Task  {}
 
+// Race-aware sweep: per-task flag set whenever a live owner heartbeats,
+// cleared whenever the sweeper takes a freshness observation. Models
+// the chain_predecessor compare-and-swap on the TaskHeartbeat chain —
+// the preempt heartbeat sweepers write before reclaim only commits if
+// no live heartbeat has advanced the chain since the observation. The
+// sweeper's reclaim precondition reads this flag instead of `Alive`
+// directly; the model thereby captures the gap between "ground-truth
+// liveness" and "what the sweeper can know via heartbeats".
+var sig HbSinceObs in Task {}
+
 fact Init {
   no Pending
   no HasReport
   no HasProof
+  no HbSinceObs
   Alive = Agent                           // all agents start alive
   all t: Task | no t.phase and no t.owner
 }
@@ -90,23 +101,28 @@ pred frameAllTasks {
 
 pred plan[t: Task] {
   t not in Pending
-  Pending'   = Pending + t
-  HasReport' = HasReport
-  HasProof'  = HasProof
-  Alive'     = Alive
+  Pending'    = Pending + t
+  HasReport'  = HasReport
+  HasProof'   = HasProof
+  Alive'      = Alive
+  HbSinceObs' = HbSinceObs
   t.phase'  = PNew
   no t.owner'
   frameOtherTasks[t]
 }
 
 // Atomic claim — only an Alive agent may claim, and only a New task.
+// Re-claim resets the heartbeat-since-observation flag because the
+// chain logically restarts: the sweeper's prior observation refers to
+// the previous owner's chain.
 pred claim[a: Agent, t: Task] {
   isNew[t]
   a in Alive
-  Pending'   = Pending
-  HasReport' = HasReport
-  HasProof'  = HasProof
-  Alive'     = Alive
+  Pending'    = Pending
+  HasReport'  = HasReport
+  HasProof'   = HasProof
+  Alive'      = Alive
+  HbSinceObs' = HbSinceObs - t            // fresh chain for new owner
   t.phase' = PWorking
   t.owner' = a
   frameOtherTasks[t]
@@ -118,22 +134,60 @@ pred claim[a: Agent, t: Task] {
 pred crash[a: Agent] {
   a in Alive
   Alive' = Alive - a
-  Pending'   = Pending
-  HasReport' = HasReport
-  HasProof'  = HasProof
+  Pending'    = Pending
+  HasReport'  = HasReport
+  HasProof'   = HasProof
+  HbSinceObs' = HbSinceObs
   frameAllTasks
 }
 
-// Reclaim a task whose owner has died: reset to PNew, no owner, so
-// another agent can claim it. Enabled iff phase=PWorking AND owner ∉ Alive.
+// Worker heartbeat — the live owner extends the heartbeat chain.
+// Sets the per-task `HbSinceObs` flag, which the sweeper's reclaim
+// precondition reads. Mirrors the runtime's `pm heartbeat` (which
+// chain_predecessor-appends a TaskHeartbeat).
+pred heartbeat[a: Agent, t: Task] {
+  isWorking[t]
+  t.owner = a
+  a in Alive
+  HbSinceObs' = HbSinceObs + t
+  Pending'    = Pending
+  HasReport'  = HasReport
+  HasProof'   = HasProof
+  Alive'      = Alive
+  frameAllTasks
+}
+
+// Sweeper freshness observation. Clears `HbSinceObs[t]` so any
+// subsequent worker heartbeat will be visible to the sweep's reclaim
+// precondition. Mirrors `latest_heartbeat()` snapshot in `sweep.py`.
+pred sweepObserve[t: Task] {
+  isWorking[t]                            // only working tasks are observed
+  HbSinceObs' = HbSinceObs - t
+  Pending'    = Pending
+  HasReport'  = HasReport
+  HasProof'   = HasProof
+  Alive'      = Alive
+  frameAllTasks
+}
+
+// Reclaim a task: reset to PNew, no owner. Sweeper acts on the
+// observation, NOT on `Alive` directly — so reclaim's precondition is
+// "no heartbeat has advanced the chain since my observation"
+// (`t not in HbSinceObs`). The runtime enforces this via
+// chain_predecessor on prevHeartbeat: a preempt heartbeat with stale
+// prev is rejected with WorkerStillAlive.
+//
+// This decouples sweeper-belief from ground-truth liveness — and is
+// where the model now matches the runtime's actual race surface.
 pred reclaim[t: Task] {
   isWorking[t]
   some t.owner
-  no (t.owner & Alive)                    // owner has crashed
-  Pending'   = Pending
-  HasReport' = HasReport                  // reports survive recycling
-  HasProof'  = HasProof
-  Alive'     = Alive
+  t not in HbSinceObs                     // preempt would commit
+  Pending'    = Pending
+  HasReport'  = HasReport                 // reports survive recycling
+  HasProof'   = HasProof
+  Alive'      = Alive
+  HbSinceObs' = HbSinceObs - t            // chain logically resets
   t.phase' = PNew
   no t.owner'
   frameOtherTasks[t]
@@ -143,10 +197,11 @@ pred report[a: Agent, t: Task] {
   isWorking[t]
   t.owner = a
   a in Alive
-  HasReport' = HasReport + t
-  Pending'   = Pending
-  HasProof'  = HasProof
-  Alive'     = Alive
+  HasReport'  = HasReport + t
+  Pending'    = Pending
+  HasProof'   = HasProof
+  Alive'      = Alive
+  HbSinceObs' = HbSinceObs
   frameAllTasks
 }
 
@@ -156,10 +211,11 @@ pred finish[a: Agent, t: Task, terminal: Phase] {
   t.owner = a
   a in Alive                              // dead agent can't finish
   t in HasReport
-  HasProof'  = HasProof + t
-  Pending'   = Pending
-  HasReport' = HasReport
-  Alive'     = Alive
+  HasProof'   = HasProof + t
+  Pending'    = Pending
+  HasReport'  = HasReport
+  Alive'      = Alive
+  HbSinceObs' = HbSinceObs
   t.phase' = terminal
   t.owner' = t.owner
   frameOtherTasks[t]
@@ -168,6 +224,7 @@ pred finish[a: Agent, t: Task, terminal: Phase] {
 pred stutter {
   Pending' = Pending and Alive' = Alive
   and HasReport' = HasReport and HasProof' = HasProof
+  and HbSinceObs' = HbSinceObs
   and frameAllTasks
 }
 
@@ -177,6 +234,8 @@ fact Transitions {
     or (some t: Task              | plan[t])
     or (some a: Agent, t: Task    | claim[a, t])
     or (some a: Agent             | crash[a])
+    or (some a: Agent, t: Task    | heartbeat[a, t])
+    or (some t: Task              | sweepObserve[t])
     or (some t: Task              | reclaim[t])
     or (some a: Agent, t: Task    | report[a, t])
     or (some a: Agent, t: Task, p: Phase | finish[a, t, p])
@@ -191,15 +250,13 @@ assert SingleOwner {
 }
 check SingleOwner for 4 but 10 steps
 
-// 2. Reclaim can never fire on a task whose owner is alive.
-//    Equivalently: if a task transitions PWorking → PNew, the owner at
-//    the prior moment must have been dead.
-assert ReclaimRequiresDeadOwner {
-  always all t: Task |
-    (isWorking[t] and after isNew[t]) =>
-      no (t.owner & Alive)
-}
-check ReclaimRequiresDeadOwner for 4 but 10 steps
+// (Removed: `ReclaimRequiresDeadOwner` from the omniscient lease model.
+//  Intentionally weakened in the race-aware model — the sweeper acts on
+//  heartbeat freshness rather than ground-truth liveness, so a live
+//  worker that doesn't heartbeat fast enough CAN be reclaimed. The
+//  operational constraint is captured by the run scenario
+//  `LiveWorkerCanBeReclaimedIfSilent` below; the realistic safety
+//  property is `LiveHeartbeatBlocksReclaim`.)
 
 // 3. Only Alive agents can claim/report/finish — a dead agent can't
 //    progress a task it owns. (Inv-by-construction: each transition
@@ -227,6 +284,29 @@ assert NoZombieAfterReclaim {
       after (no t.owner)
 }
 check NoZombieAfterReclaim for 4 but 10 steps
+
+// 6. Race-aware reclaim: a reclaim transition only fires on tasks
+//    whose `HbSinceObs` flag is clear. Equivalent to "the sweeper's
+//    preempt heartbeat would commit" in runtime terms.
+assert ReclaimRequiresStableHeartbeatChain {
+  always all t: Task |
+    (isWorking[t] and after isNew[t]) =>
+      t not in HbSinceObs
+}
+check ReclaimRequiresStableHeartbeatChain for 4 but 10 steps
+
+// 7. Heartbeat-vs-reclaim race safety: if a live worker heartbeats
+//    AFTER the sweeper's most recent observation, the sweeper cannot
+//    reclaim until it re-observes. Closes the TTL-window race
+//    documented in planning-blind-spots.md and fixed by the
+//    preempt-heartbeat protocol in `store.reclaim`.
+assert LiveHeartbeatBlocksReclaim {
+  always all t: Task |
+    (some a: Agent | heartbeat[a, t])
+    =>
+    after not reclaim[t]
+}
+check LiveHeartbeatBlocksReclaim for 4 but 10 steps
 
 // ===== Liveness scenarios =====
 
@@ -280,4 +360,49 @@ run TryToReclaimLiveTask {
     )
   )
 } for exactly 1 Task, exactly 1 Agent, 6 steps
+expect 0
+
+// Operational caveat (witness): a live worker that fails to heartbeat
+// between observations CAN be reclaimed. The runtime mitigation is
+// configuration: heartbeat interval must be < TTL (sweep config). This
+// run is intentionally SAT to document the trade-off rather than hide
+// it behind an assertion that would fail by design.
+run LiveWorkerCanBeReclaimedIfSilent {
+  some t: Task, a: Agent |
+    eventually (
+      isWorking[t] and t.owner = a and a in Alive and
+      eventually (
+        sweepObserve[t] and after (
+          reclaim[t]                        // succeeds without crash
+        )
+      )
+    )
+} for exactly 1 Task, exactly 1 Agent, 8 steps
+
+// Heartbeat-vs-reclaim race witness. The sweeper observes (clears
+// HbSinceObs[t]); a live worker heartbeats (sets HbSinceObs[t]);
+// sweeper attempts reclaim — must be blocked. SAT trace showing the
+// observation + heartbeat + (still-working) outcome.
+run RaceWindowSurvived {
+  some t: Task, a: Agent |
+    eventually (
+      isWorking[t] and t.owner = a and a in Alive and
+      eventually (
+        sweepObserve[t] and after (
+          heartbeat[a, t] and after (
+            isWorking[t]                  // worker survived; not reclaimed
+          )
+        )
+      )
+    )
+} for exactly 1 Task, exactly 1 Agent, 10 steps
+
+// Negative — sweeper attempts reclaim immediately after a worker's
+// heartbeat. Should be UNSAT under LiveHeartbeatBlocksReclaim.
+run TryReclaimAfterHeartbeat {
+  some t: Task, a: Agent |
+    eventually (
+      heartbeat[a, t] and after reclaim[t]
+    )
+} for exactly 1 Task, exactly 1 Agent, 8 steps
 expect 0

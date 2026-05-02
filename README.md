@@ -169,7 +169,9 @@ The Alloy models prove these hold under any interleaving of parallel agents usin
 | Dependencies are `done` at the moment a task is claimed | `next.py` skips blocked tasks |
 | Verifier-required tasks cannot reach `done` without a passing verifier | `finished.py` runs the verifier and refuses on non-zero exit → exit 9 |
 | Sticky chains stay bound to one agent context | `store.check_sticky_eligibility`; refusal exit 10 across `executing`/`heartbeat`/`report`/`finished` |
-| A live worker is never wrongly reclaimed; a dead worker's task is recoverable | `sweep.py` only reclaims tasks past heartbeat TTL; `store.reclaim` appends `new` status with `reclaimed=true` (`planning_lease.als`) |
+| A live worker is never wrongly reclaimed (heartbeat-vs-reclaim race) | `sweep.py` snapshots the heartbeat tip, then `store.reclaim(preempt_heartbeat=True, …)` writes a preempt heartbeat first; `chain_predecessor` on `prevHeartbeat` rejects if a worker raced → `WorkerStillAlive` → sweep aborts (`LiveHeartbeatBlocksReclaim`, `ReclaimRequiresStableHeartbeatChain` in `planning_lease.als`) |
+| Zombie heartbeats from displaced agents are refused | `heartbeat.py` checks current working status's `agent` matches `--agent` → exit 12 if not |
+| A dead worker's task is recoverable | `sweep.py` reclaims tasks past heartbeat TTL; `store.reclaim` appends `new` status with `reclaimed=true` (`NoZombieAfterReclaim`) |
 | Two parallel `pm plan` calls cannot both create the same slug | `Task.text` is `task:<queue>/<slug>`; hashharness rejects duplicate `text_sha256` → `SlugTaken` → exit 4 |
 | Every claim attempt eventually resolves (commit or abort) | `executing.py` always exits 0/6/8/10 |
 
@@ -201,7 +203,7 @@ verify=~/.claude/plugins/cache/morozov-claude-plugin/formal-methods/1.3.0/skills
 
 # Alloy (bounded counterexamples + scenarios)
 bash $verify system-models/planning.als            # 13 checks, 11 SAT runs + 2 expected-UNSAT
-bash $verify system-models/planning_lease.als      # 5 checks, 3 SAT runs + 1 expected-UNSAT
+bash $verify system-models/planning_lease.als      # 6 checks, 5 SAT runs + 2 expected-UNSAT
 bash $verify system-models/planning_plan_race.als  # 1 check, 1 expected-UNSAT
 
 # Dafny (unbounded inductive proofs over the same protocol)

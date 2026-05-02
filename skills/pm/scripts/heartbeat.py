@@ -7,11 +7,19 @@ The supervisor (sweep.py) uses heartbeat freshness to detect dead claimants.
 Usage:
   heartbeat.py --task SHA [--agent ID]
 
-Refuses if the task's current TaskStatus is not `working`.
+Refuses if:
+  * the task's current TaskStatus is not `working` (exit 6) — heartbeat
+    is meaningless on a non-working task; OR
+  * the current working status is owned by a different agent (exit 12) —
+    a zombie heartbeat from a process that lost its lease (e.g. via
+    sweep+reclaim then re-claim by another worker) would otherwise
+    falsely keep the new owner's task "fresh" and prevent legitimate
+    reclamation if that new owner dies.
 
 Exit codes:
-  0  heartbeat appended
-  6  task not in `working` phase — heartbeat is meaningless
+  0   heartbeat appended
+  6   task not in `working` phase — heartbeat is meaningless
+  12  current working status is owned by a different agent (lease lost)
 """
 from __future__ import annotations
 
@@ -41,6 +49,14 @@ def main() -> int:
             f"refusing: task {args.task[:12]} is not in 'working' phase\n"
         )
         return 6
+
+    owner = (latest.get("attributes") or {}).get("agent")
+    if owner and owner != args.agent:
+        sys.stderr.write(
+            f"refusing: task {args.task[:12]} working status is owned by "
+            f"'{owner}', not '{args.agent}' — lease lost (zombie heartbeat)\n"
+        )
+        return 12
 
     hb = store.append_heartbeat(args.task, args.agent, latest["record_sha256"])
     print(json.dumps(hb, indent=2))

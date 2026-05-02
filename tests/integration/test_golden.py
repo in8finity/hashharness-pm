@@ -621,7 +621,7 @@ def g20_heartbeat_wins_reclaim_race() -> None:
                         "--text", "race victim",
                         env_extra={"PM_WORKDIR": ""}).stdout
                      )["task"]["text_sha256"]
-    pm("executing", "--task", sha)
+    pm("executing", "--task", sha, "--agent", "g20-worker")
 
     # Sweeper would have observed the heartbeat tip BEFORE the worker
     # heartbeated — capture that snapshot now.
@@ -629,7 +629,9 @@ def g20_heartbeat_wins_reclaim_race() -> None:
     prev_hb_sha = prev_hb["record_sha256"] if prev_hb else None
 
     # Worker heartbeats — extending the chain past the sweeper's snapshot.
-    pm("heartbeat", "--task", sha)
+    # Must match the agent that holds the working status (heartbeat.py
+    # exit-12 lease check, see G22).
+    pm("heartbeat", "--task", sha, "--agent", "g20-worker")
 
     # Sweeper attempts reclaim with the now-stale snapshot.
     try:
@@ -649,6 +651,44 @@ def g20_heartbeat_wins_reclaim_race() -> None:
     # Task must remain working — worker not evicted.
     assert_eq(store.status_value(store.latest_status(sha)), "working",
               "G20 task must remain working after raced reclaim is refused")
+
+
+def g22_zombie_heartbeat_after_reclaim_refused() -> None:
+    """G22: agent A claims, gets reclaimed, agent B re-claims. Zombie A
+    tries to heartbeat → exit 12 (lease lost). Closes the stale-claim
+    heartbeat hole that the preempt mechanism alone couldn't catch."""
+    q = fresh_queue("g22")
+    sha = json.loads(pm("plan", "--queue", q, "--title", "g22",
+                        "--text", "zombie hb",
+                        env_extra={"PM_WORKDIR": ""}).stdout
+                     )["task"]["text_sha256"]
+    # Agent A claims.
+    pm("executing", "--task", sha, "--agent", "agent-A")
+    assert_eq(store.status_value(store.latest_status(sha)), "working",
+              "G22 setup: A holds working")
+
+    # Sweeper reclaims (no heartbeat racing).
+    prev_hb = store.latest_heartbeat(sha)
+    store.reclaim(sha, reason="g22 force reclaim",
+                  reclaimer="g22-sweep",
+                  preempt_heartbeat=True,
+                  preempt_prev_heartbeat_sha=(prev_hb["record_sha256"]
+                                              if prev_hb else None))
+    assert_eq(store.status_value(store.latest_status(sha)), "new",
+              "G22 setup: reclaimed back to new")
+
+    # Agent B re-claims.
+    pm("executing", "--task", sha, "--agent", "agent-B")
+    new_owner = (store.latest_status(sha).get("attributes") or {}).get("agent")
+    assert_eq(new_owner, "agent-B", "G22 setup: B now owns")
+
+    # Zombie A wakes up and tries to heartbeat.
+    p = pm("heartbeat", "--task", sha, "--agent", "agent-A", check=False)
+    assert_eq(p.returncode, 12,
+              f"G22 zombie heartbeat must exit 12; got {p.returncode}")
+
+    # B can still heartbeat normally.
+    pm("heartbeat", "--task", sha, "--agent", "agent-B")
 
 
 def g21_sweep_wins_with_no_concurrent_heartbeat() -> None:
@@ -720,6 +760,7 @@ ALL_FLOWS = {
     "G19": g19_nonexistent_dep_refused,
     "G20": g20_heartbeat_wins_reclaim_race,
     "G21": g21_sweep_wins_with_no_concurrent_heartbeat,
+    "G22": g22_zombie_heartbeat_after_reclaim_refused,
 }
 
 
