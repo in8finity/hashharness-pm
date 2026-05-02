@@ -41,6 +41,10 @@ Long-running queues develop pathologies: a worker dies mid-claim, a task gets st
 
 These keep an autonomous queue self-healing without requiring an operator to surgically edit storage when something goes wrong.
 
+### 6. Chunk-grouped parallel work via sticky-context subtasks
+
+When a queue has items that share expensive reads (chunk files, repo clones, model loads, dataset slices), naive parallelism makes every worker re-fetch the same data; serial wastes wall time. Use `pm plan --sticky` for a *cluster parent* whose body lists the shared resources, then `pm plan --parent <PARENT>` for each item that needs them — subtasks inherit the sticky flag automatically. The first worker to claim the parent (with its own `PM_CONTEXT_ID`) binds the cluster; subsequent claims by other contexts are refused with exit 10 (`StickyContextMismatch`), naturally routing other workers to *other* clusters. The bound worker reads the shared resources once into its own context, then claims and drains the subtasks reusing that read. Singletons (items with no shared chunks) stay non-sticky and ride the normal pull-from-queue path. Sticky binding turns "shared cache" into a first-class queue topology — no external cache, no inter-worker coordination beyond the planning board's own race-safe gates. Combine with the dashboard (`pm dashboard`) to see clusters as parent-rooted trees with their bound `ctx:` tag at a glance.
+
 ## Similar systems
 
 The closest direct comparators are agent orchestration frameworks. The workflow tools below are included separately because they are not agent-first products, even though they are now used to run agent workloads.
