@@ -1257,6 +1257,47 @@ def g40_replan_cascade_down_parents() -> None:
               "G40 k3 (deps-descendant of k2) reset")
 
 
+def g46_sticky_rebinding_after_reclaim() -> None:
+    """G46: a sticky task claimed by ctx1, reclaimed, then claimed by
+    ctx2 (different) — the binding REBINDS to ctx2; subsequent
+    operations from ctx1 are refused with exit 10. Verifies the
+    runtime-level realization of
+    planning_sticky_rebinding.als#RebindWitness (claim → reclaim →
+    rebind 4-state trace) and SR1 (reclaim clears binding)."""
+    q = fresh_queue("g46s")
+    ctx1 = pm("context-id").stdout.strip()
+    ctx2 = pm("context-id").stdout.strip()
+    assert ctx1 != ctx2, "G46 needs two distinct contexts"
+
+    # Plan + claim with ctx1.
+    sticky_env1 = {"PM_CONTEXT_ID": ctx1, "PM_WORKDIR": ""}
+    sha = json.loads(pm("plan", "--queue", q, "--title", "T",
+                        "--text", "sticky", "--sticky",
+                        env_extra=sticky_env1).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", sha, env_extra=sticky_env1)
+    bound = store.status_context_id(store.latest_status(sha))
+    assert_eq(bound, ctx1, "G46 ctx1 binds on first claim")
+
+    # Reclaim. Latest status now has no context_id (binding cleared).
+    pm("reclaim", "--task", sha, "--reason", "test rebind")
+    cleared = store.status_context_id(store.latest_status(sha))
+    assert cleared is None, \
+        f"G46 SR1: reclaim must clear binding; got {cleared!r}"
+
+    # Re-claim with ctx2. Must succeed and bind to ctx2.
+    sticky_env2 = {"PM_CONTEXT_ID": ctx2, "PM_WORKDIR": ""}
+    pm("executing", "--task", sha, env_extra=sticky_env2)
+    rebound = store.status_context_id(store.latest_status(sha))
+    assert_eq(rebound, ctx2, "G46 SR2/SR4: rebind to ctx2")
+
+    # ctx1 (old context) trying to operate on the now-rebound task →
+    # exit 10 (StickyContextMismatch).
+    p = pm("report", "--task", sha, "--title", "x", "--text", "y",
+           env_extra=sticky_env1, check=False)
+    assert_eq(p.returncode, 10,
+              f"G46 ctx1 must be refused after rebind; got {p.returncode}")
+
+
 def g45_self_parent_refused() -> None:
     """G45: pm plan --parent <self-sha> exits 11 (NoSelfParent). The
     deterministic sha of `task:<queue>/<slug>` is computable by a
@@ -1475,6 +1516,7 @@ ALL_FLOWS = {
     "G43": g43_cascade_down_parents_skips_inflight_parent,
     "G44": g44_superseded_child_is_terminal_for_parent_gate,
     "G45": g45_self_parent_refused,
+    "G46s": g46_sticky_rebinding_after_reclaim,
 }
 
 
