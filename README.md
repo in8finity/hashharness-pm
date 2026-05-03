@@ -1,114 +1,97 @@
 # hashharness-pm
 
-**A formally-verified planning board for parallel coding agents.** Sixteen Claude Code skills and a `pm` CLI dispatcher coordinate multi-step skill executions over [hashharness](https://github.com/in8finity/hashharness)'s append-only hash-chained storage. Every concurrency guarantee is proved by an Alloy or Dafny model checked into this repo.
+**A planning board for coordinating coding agents that need to work in parallel, survive restarts, and prove what they did.** Sixteen Claude Code skills and a `pm` CLI dispatcher backed by [hashharness](https://github.com/in8finity/hashharness)'s append-only storage.
 
-Existing agent frameworks give you orchestration *or* durability *or* race safety — `hashharness-pm` is small, storage-first, and gives all three with formal guarantees. Long-running autonomous queues need all three.
+If you've tried to run multiple agents against the same project and watched them claim the same task twice, lose track of what's done after a crash, or finish work without recording proof of it — those are the problems this solves.
 
 ## At a glance
 
 ```bash
 pm plan      --title "Build X" --text "..."        # enqueue
 pm next                                             # pull next runnable task
-pm executing --task <sha>                           # claim (race-safe via chain_predecessor)
+pm executing --task <sha>                           # claim (no two agents win)
 pm report    --task <sha> --title "..." --text-file out.md
-pm finished  --task <sha>                           # close (verifier-gated)
+pm finished  --task <sha>                           # close (won't fire without a report)
 ```
 
-That five-command worker loop is what every agent runs in parallel. Around it sit supervisor primitives (`pm cancel / replan / sweep / reclaim`), batch primitives (`pm bulk-plan`), and three meta-skills that drive *another* skill end-to-end through this very queue (`pm-{auto,assisted,guided}-skill-execution`). Full bootstrap in [Quick start](#quick-start).
+That five-command worker loop is what every agent runs. Around it sit supervisor primitives (`pm cancel / replan / sweep / reclaim`), batch enqueue (`pm bulk-plan`), and three meta-skills that drive *another* skill end-to-end through this very queue (`pm-{auto,assisted,guided}-skill-execution`). Full bootstrap in [Quick start](#quick-start).
 
 ---
 
-## What you actually get
+## What it solves
 
-Six capabilities, ordered by what matters first.
+Five problems, in the order most users hit them.
 
-### 1. A formally-verified queue protocol
+### 1. Two agents claim the same task
 
-Ten Alloy modules prove **67 invariants** over the protocol; six Dafny ports add **94 unbounded inductive lemmas**; **47 golden integration tests** assert the same properties at runtime. Every property is enforced at four layers — code, skill text, model, test — and the cross-source consistency is tracked in `system-models/reports/planning-{reconciliation,enforcement}.md`.
+Without a queue protocol, parallel agents on the same project race on file edits, double-execute steps, or quietly drop work. `pm next` returns a runnable task; `pm executing` tries to claim it; **at most one of N concurrent claimants wins** — the rest exit 8 (`ClaimLost`) and pull the next task. The race resolution is structural: hashharness compare-and-swaps the per-task TaskStatus head pointer (`chain_predecessor`), so the rejection happens in storage, not in the script. Same mechanism makes `pm plan` reject duplicate slugs (exit 4) and prevents zombie heartbeats from a reclaimed worker (exit 12).
 
-The properties that protect a parallel-agent queue:
+For workloads with shared expensive reads (chunk files, repo clones, model loads), `pm plan --sticky` binds a *cluster parent* and its subtasks to whichever agent context first claims the parent — other agents get refused with exit 10 (`StickyContextMismatch`) and route to other clusters. The bound worker reads the shared resource once and drains its subtasks reusing that read; no external cache, no inter-worker coordination beyond the queue.
 
-| Property | Where enforced |
+### 2. The agent dies mid-task and the queue gets stuck
+
+Workers tick `pm heartbeat` on a configurable interval. When a heartbeat goes silent past `pm sweep --ttl`, the sweeper appends a fresh `new` status and the task becomes claimable again — by *any* agent, with a fresh sticky context if applicable. This is race-safe in the other direction too: a sweeper observing a stale tip writes a *preempt heartbeat* before reclaiming, and a still-live worker that raced ahead causes the sweep to abort (`WorkerStillAlive`), so a healthy worker never has its claim yanked.
+
+If you don't want to wait for TTL — supervisor override via `pm reclaim --task <sha>`, with `--cascade` to also release every working descendant in a sticky chain.
+
+### 3. You can't tell what an agent actually did
+
+`pm finished` refuses to close a task without a TaskReport on chain (exit 7). The status, report, and heartbeat chains are append-only and content-addressed, so an agent that wants to claim "done" has to produce the proof first, and the audit trail can't be silently rewritten after the fact.
+
+For higher-stakes work, declare a **verifier** at plan time (`--verifier`):
+
+| Form | What runs |
 |---|---|
-| Done/rejected is absorbing — a finished task never transitions out | `finished.py` rejects unless current is `working`/`new`; `cancel.py` exit 6 on terminal |
-| A terminal status always has a `proof` link to a TaskReport | `finished.py` refuses without a report → exit 7; `cancel_task` synthesizes proof before the rejected status |
-| At most one agent owns the latest TaskStatus of a task | hashharness `chain_predecessor` on `prevStatus` (compare-and-swap on the TaskStatus head) → `HeadMoved` → `ClaimLost` → `executing.py` exit 8 |
-| Dependencies are `done` at the moment a task is claimed | `next.py` skips blocked tasks |
-| Parent rolls up children — a wrapper task stays unrunnable until every child is in `{done, rejected, superseded}` | `next.py`/`pull.py` `children_settled()` filter |
-| Verifier-required tasks cannot reach `done` without a passing verifier | `finished.py` runs the verifier and refuses on non-zero exit → exit 9 |
-| Sticky chains stay bound to one agent context | `store.check_sticky_eligibility`; refusal exit 10 across `executing`/`heartbeat`/`report`/`finished` |
-| Sticky binding rebinds cleanly after reclaim | `store.reclaim` writes status with no `context_id`; next claim sets a fresh one |
-| A live worker is never wrongly reclaimed (heartbeat-vs-reclaim race) | `sweep.py` snapshots the heartbeat tip, then `store.reclaim(preempt_heartbeat=True, …)` writes a preempt heartbeat first; `chain_predecessor` on `prevHeartbeat` rejects if a worker raced → `WorkerStillAlive` → sweep aborts |
-| Zombie heartbeats from displaced agents are refused | `heartbeat.py` checks current working status's `agent` matches `--agent` → exit 12 if not |
-| A dead worker's task is recoverable | `sweep.py` reclaims tasks past heartbeat TTL; `store.reclaim` appends `new` status with `reclaimed=true` |
-| Two parallel `pm plan` calls cannot both create the same slug | `Task.text` is `task:<queue>/<slug>`; hashharness rejects duplicate `text_sha256` → `SlugTaken` → exit 4 |
-| `--depends-on` self-loop / non-existent / forever-blocked rejected at plan time; `--parent` self-parent / cycle likewise | `plan.py` and `bulk_plan.py` exit 11 |
-| Every claim attempt eventually resolves (commit or abort) | `executing.py` always exits 0/6/8/10 |
+| `skill:NAME` / `prompt:CRITERION` | Worker self-attests in the report; `pm finished` parses a `## Verifier Attestation` block and gates on the verdict. No subprocess. |
+| `verify-skill:NAME` / `verify-prompt:CRITERION` | Spawns a fresh `claude -p` subprocess to independently re-judge the task body + report. Higher cost; useful when self-attestation isn't trusted enough. |
+| `<absolute path>` (or `env FOO=bar /path/check.sh`) | Spawns the script with env `PM_TASK`, `PM_REPORT_SHA`, `PM_QUEUE`, `PM_SLUG`, `PM_VERIFIER`. Exit 0 = pass; non-zero = fail (closes with exit 9). |
 
-Both race conditions are content-addressed gates inside hashharness: slug uniqueness rides the `text_sha256` index, and claim ordering rides the per-`(work_package_id, type)` `chain_predecessor` head pointer. The scripts plumb structural rejections up to operator-visible exit codes.
+The verifier's command, exit code, and summary are recorded as attributes on the closing `done` status — and on `--skip-verifier` close-outs too (with `verifier_exit = -1`), so a downstream auditor can spot bypasses.
 
-See [Verifying the models](#verifying-the-models) to re-run everything yourself.
+### 4. A long-running skill execution needs to survive partial failures and pick up where it left off
 
-### 2. A worker loop you can give to N agents in parallel
+Three meta-skills wrap the queue to drive *another* skill end-to-end, planning one task per SKILL.md step chained by `dependsOn`. Pick by how much human input you want to keep in the loop:
 
-```
-1. pm next --queue <Q>             → JSON or "null"
-2. pm executing --task TASK        → exit 0 win | 6 pre-claim refusal | 8 race-lost | 10 sticky-context refusal
-3. read task.attributes.body, do the work
-4. pm report --task TASK --title T --text-file ...
-5. pm finished --task TASK         → exit 0 done | 7 missing report | 9 verifier failed | 10 sticky-context refusal
-```
+- **Auto** (`pm-auto-skill-execution`) — every choice the target skill would normally ask is resolved to its documented default; the choice and reasoning are recorded in the task report. Auto rejects steps whose preconditions can't be satisfied automatically. Best for routine runs and well-understood skills.
+- **Assisted** (`pm-assisted-skill-execution`) — default-pick at routine gates, pause-and-ask at critical ones. Doesn't auto-reject when a decision is required; escalates to the user instead. Best for mostly-routine runs that may need 1–3 user inputs.
+- **Guided** (`pm-guided-skill-execution`) — step-by-step with user-in-the-loop gates after every step. Best for novel problems and sign-off gates.
 
-`pm plan` itself can also exit 4 (slug already taken). `pm execute` (the `pm-execute` skill) spawns N agents in parallel running this loop. Workers tick a heartbeat (`pm heartbeat`) on a configurable interval so the sweeper can distinguish a long-running task from a dead one.
+Because the queue is durable, you can pause / interrupt / replan mid-flight without losing what was already proven done. The wrapper itself is just tasks on the same chain, visible to the live HTTP dashboard (`pm dashboard`) alongside everything else.
 
-### 3. Three skills to drive *another* skill end-to-end
+All three accept `--depth N`: at `N≥1` the inner skill's steps become real subtasks under the wrapper, and a parent-rolls-up-children gate keeps the wrapper unrunnable until the expansion completes. `pm bulk-plan --chain-siblings` enqueues the whole tree in one command instead of N script-generated `pm plan` calls.
 
-Each one wraps the queue to plan one task per SKILL.md step, chained by `dependsOn`, with the audit trail on the status + report chains. Pick by how much agency you want the meta-skill to take.
+### 5. A step's output turned out wrong and you need to rebuild
 
-- **Auto** (`pm-auto-skill-execution`) — hands-off run. Every choice the target skill would normally ask is resolved to its documented default; the choice and reasoning are recorded in the task report. Auto rejects steps whose preconditions can't be satisfied automatically. Best for routine runs, batch processing, well-understood skills.
-- **Assisted** (`pm-assisted-skill-execution`) — default-pick at routine gates, pause-and-ask at critical ones. Doesn't auto-reject when a decision is required; escalates to the user instead and resumes once answered. Best for mostly-routine runs that may need 1–3 user inputs (the everyday mode for skills you understand most of, but not all).
-- **Guided** (`pm-guided-skill-execution`) — step-by-step with user-in-the-loop gates. Pauses after each step to surface decisions, accept user-supplied subtask requests, and confirm before moving on. Best for novel problems and sign-off gates.
+`pm replan` restarts a task with three cascade modes — pick by failure shape, not habit:
 
-All three accept `--depth N`: at `N=0` each step is one task even if it invokes another skill; at `N≥1` the inner skill's steps become real subtasks under the wrapper, and the parent-rolls-up-children gate keeps the wrapper unrunnable until the expansion completes. `pm bulk-plan --chain-siblings` enqueues the whole tree in one call.
+- **`--no-cascade`** — just reset the target. Right for sandbox/transient failures (worker died mid-step, OOM, network blip): inputs were fine, the step just didn't get to run.
+- **default cascade-up** — also reset the target's `dependsOn` ancestors. Right when upstream output is *suspect* and the whole chain needs re-derivation.
+- **`--cascade-down`** — also reset every task transitively depending on the target. Right when the target's output is *now stale* and downstream artifacts built on it must rebuild (classic case: you fixed a bug in step 3, so steps 4/5/6 need to redo).
+- **`--cascade-down-parents`** — additionally reset rollup parents whose children were invalidated. Use for `--depth ≥1` skill expansions where the parent's report summarised children's outcomes.
 
-### 4. Sticky-context binding for shared expensive reads
+For controlled cancellation, `pm cancel` terminates a task and optionally cascades to unfinished subtasks; it synthesizes a TaskReport carrying the cancel reason so the closing `rejected` status still satisfies the proof-of-work gate.
 
-When a queue has items that share expensive reads (chunk files, repo clones, model loads, dataset slices), naive parallelism makes every worker re-fetch; serial wastes wall time. Plan a *cluster parent* with `pm plan --sticky` whose body lists the shared resources, then `pm plan --parent <PARENT>` for each item that needs them — subtasks inherit `sticky` automatically. The first worker to claim the parent (with its own `PM_CONTEXT_ID`) binds the cluster; subsequent claims by other contexts are refused with exit 10, naturally routing other workers to *other* clusters. The bound worker reads the shared resources once into its own context, then claims and drains the subtasks reusing that read.
+### 6. Multiple projects share one hashharness backend
 
-Singletons stay non-sticky and ride the normal pull path. Sticky binding turns "shared cache" into a first-class queue topology — no external cache, no inter-worker coordination beyond the planning board's own race-safe gates. The `StickyChainCoherence`, `StickyBindingOnlyAtClaim`, and `RebindAfterReclaim` (SR1–SR5) properties are formally verified.
-
-### 5. Workdir-scoped queues for multi-project setups
-
-`pm plan` records `os.path.realpath(cwd)` (or `$PM_WORKDIR`) into `task.attributes.workdir` at plan time, and `pm next` filters out tasks whose workdir doesn't match the caller's. The result: a single hashharness instance can host queues for many independent workspaces without cross-talk — a worker started in `~/projects/A` only ever pulls tasks planned from `~/projects/A`, even if `~/projects/B` is also using the same backend. Subtasks inherit the parent's workdir so a planner in one repo can spawn children that stay scoped there. Useful for developer machines running multiple projects against shared hashharness storage, or for sandboxed worker pools that should only see tasks scoped to their assigned workspace.
-
-### 6. Supervisor primitives for recovery
-
-Long-running queues develop pathologies: a worker dies mid-claim, a task gets stuck because its dependency was resolved wrong, a whole subtree needs to be redone with adjusted parameters, an upstream step has a bug and downstream artifacts are now stale. Four primitives, each with a verified failure-mode contract:
-
-- **`pm cancel`** terminates a task (and optionally cascades to unfinished subtasks) regardless of ownership; synthesizes a `TaskReport` carrying the cancel reason so the closing `rejected` status still satisfies the proof-of-work invariant.
-- **`pm replan`** restarts a task with three cascade modes: **`--no-cascade`** (just the target — right for sandbox/transient failures), **default cascade-up** (also reset the target's `dependsOn` ancestors — right when upstream output is suspect), **`--cascade-down`** (also reset every task transitively depending on the target — right when target's output is now stale and downstream artifacts must rebuild), **`--cascade-down-parents`** (additionally reset rollup parents whose children were invalidated — closes the stale-rollup hazard for `--depth ≥1` skill expansions). Supports body / verifier edits via `--text` / `--verifier` (clone-and-supersede mode).
-- **`pm sweep` + `store.reclaim`** detect heartbeat-stale claimants (the worker process died holding a `working` status), append a `new` status with `reclaimed=true`, and let the queue route the task to a healthy worker. Race-safe against a still-live worker via a preempt heartbeat (`chain_predecessor` on `prevHeartbeat`).
-- **`pm reclaim`** is the manual force-release variant — supervisor / human override that doesn't wait for sweep TTL. With `--cascade` also reclaims every working descendant via `parentTask` reverse-links.
-
-These keep an autonomous queue self-healing without requiring an operator to surgically edit storage.
+`pm plan` records the planner's `cwd` (or `$PM_WORKDIR`) on the task; `pm next` filters out tasks whose workdir doesn't match the caller's. A worker started in `~/projects/A` only ever pulls tasks planned from `~/projects/A`, even if `~/projects/B` is using the same backend. Subtasks inherit the parent's workdir, so a planner in one repo can spawn children that stay scoped there. Useful for developer machines running multiple projects against shared infra, or sandboxed worker pools that should only see tasks scoped to their workspace.
 
 ---
 
 ## Quick start
 
-0. **First time only — install hashharness.** The bundled installer creates an isolated venv, generates a launcher, and writes a source-able `env` file:
+0. **First time only — install hashharness.** Bundled installer creates an isolated venv, generates a launcher, writes a source-able `env` file:
    ```bash
    skills/pm/scripts/pm install --to-home --yes      # → ~/.hashharness/
-   # alternatives: --to-claude (~/.claude/hashharness/), --to-project (./.hashharness/), --where /custom/path
+   # alternatives: --to-claude, --to-project, --where /custom/path
    ```
-   Idempotent — re-running on an existing install reports the location and exits 0. `pm install --check` tests without installing.
+   Idempotent — re-running on an existing install reports the location and exits 0.
 
-1. **Start the MCP server.** The installer's launcher already wires the env vars:
+1. **Start the MCP server.** The launcher already wires the env vars:
    ```bash
    ~/.hashharness/launch.sh &
    source ~/.hashharness/env                 # exports HASHHARNESS_MCP_URL
    ```
-   Or run hashharness directly if you installed it some other way:
+   Or run hashharness directly:
    ```bash
    HASHHARNESS_MCP_TRANSPORT=http \
    HASHHARNESS_HTTP_PORT=38417 \
@@ -123,36 +106,56 @@ These keep an autonomous queue self-healing without requiring an operator to sur
 
 3. **Drive the worker loop** — through Claude Code via the `pm-*` skills, or directly:
    ```bash
-   pm plan     --title "Build X" --text "Detailed description..."
+   pm plan      --title "Build X" --text "Detailed description..."
    pm next                          # pull next runnable
    pm executing --task <sha>        # claim
-   pm report   --task <sha> --title "done" --text-file out.md
-   pm finished --task <sha>         # close (requires a report)
+   pm report    --task <sha> --title "done" --text-file out.md
+   pm finished  --task <sha>        # close (requires a report)
    ```
    Skills read `HASHHARNESS_MCP_URL` (default `http://127.0.0.1:38417/mcp`).
 
+### Worker loop exit codes
+
+```
+1. pm next --queue <Q>             → JSON or "null"
+2. pm executing --task TASK        → 0 win | 6 pre-claim refusal | 8 race-lost | 10 sticky-context refusal
+3. read task.attributes.body, do the work
+4. pm report --task TASK --title T --text-file ...
+5. pm finished --task TASK         → 0 done | 7 missing report | 9 verifier failed | 10 sticky-context refusal
+```
+
+`pm plan` itself can also exit 4 (slug already taken) or 11 (invalid graph: dep self-loop / non-existent / forever-blocked / parent self-loop / parent cycle). `pm execute` (the `pm-execute` skill) spawns N agents in parallel running this loop.
+
 ---
 
-## Task verifiers (post-execution gates)
+## Why you can trust the guarantees
 
-A Task can declare a `--verifier` at plan time. When a worker calls `pm finished`, the verifier runs against the latest TaskReport before the `done` transition is allowed. Non-zero verifier exit blocks the close and leaves the task in `working` (`pm finished` exits 9). `--rejected` bypasses the verifier — rejecting work doesn't claim success, so the gate isn't load-bearing on that path. `--skip-verifier` is the documented escape hatch (records `verifier_exit = -1` on the closing status, so the bypass is auditable).
+The protocol is verified by a model checked into this repo. Every property in the table below has four enforcement layers — code (with a specific exit code), skill text (with imperative gate prose), formal model (Alloy + often Dafny), and an integration test — and the cross-source consistency is tracked in `system-models/reports/planning-{reconciliation,enforcement}.md`.
 
-Four forms of `--verifier <spec>`:
+| Guarantee | Where enforced |
+|---|---|
+| A finished task never transitions back out (terminal absorbing) | `finished.py` rejects unless current is `working`/`new`; `cancel.py` exit 6 on terminal |
+| A terminal status always has a `proof` link to a TaskReport | `finished.py` refuses without a report → exit 7; cancel synthesizes proof |
+| At most one agent owns a task's latest TaskStatus | hashharness `chain_predecessor` on `prevStatus` (compare-and-swap) → `ClaimLost` → `executing.py` exit 8 |
+| A task's deps are all `done` at the moment it's claimed | `next.py` skips blocked tasks |
+| A wrapper task waits for its expansion — parent stays unrunnable until every child is in `{done, rejected, superseded}` | `next.py` / `pull.py` `children_settled()` filter |
+| Verifier-required tasks can't reach `done` without a passing verifier | `finished.py` runs the verifier; exit 9 on non-zero |
+| Sticky chains stay bound to one agent context | `store.check_sticky_eligibility`; refusal exit 10 across `executing` / `heartbeat` / `report` / `finished` |
+| Sticky binding rebinds cleanly after reclaim (next agent gets a fresh context) | `store.reclaim` writes status with no `context_id`; next claim sets it |
+| A live worker is never wrongly reclaimed (heartbeat-vs-reclaim race) | sweep snapshots heartbeat tip → preempt heartbeat written via `chain_predecessor` on `prevHeartbeat`; live worker that raced wins → sweep aborts |
+| Zombie heartbeats from displaced agents are refused | `heartbeat.py` checks current owner matches `--agent` → exit 12 |
+| A dead worker's task is recoverable | `sweep.py` past TTL → `store.reclaim` appends `new` with `reclaimed=true` |
+| Two parallel `pm plan` calls with the same slug can't both create | `Task.text` is `task:<queue>/<slug>`; hashharness rejects duplicate `text_sha256` → exit 4 |
+| Bad graph at enqueue time refused (dep self-loop / non-existent / forever-blocked / parent self / parent cycle) | `plan.py` and `bulk_plan.py` exit 11 |
+| Every claim attempt eventually resolves (commit or abort) — no half-claimed states | `executing.py` always exits 0/6/8/10 |
 
-| Form | Who applies the criterion | When `pm finished` runs |
-|---|---|---|
-| **`skill:NAME`** *(self-attestation, default for skill-based checks)* | the worker | parses a `## Verifier Attestation` block embedded in the TaskReport (fields: `verifier:` matching the spec verbatim, `verdict: PASS\|FAIL[: reason]`, `evidence:`) and gates on the verdict. **No subprocess spawn** — the worker is contractually responsible for actually running the skill. |
-| **`prompt:CRITERION`** *(self-attestation with free-form criterion)* | the worker | same attestation contract as `skill:`, just with arbitrary criterion text. |
-| **`verify-skill:NAME`** / **`verify-prompt:CRITERION`** *(opt-in, independent re-judgment)* | a fresh `claude -p` subprocess that `pm finished` spawns | independently re-checks the task body + report against the skill / criterion. Higher cost; useful when self-attestation isn't trusted enough. The LLM must terminate output with `VERDICT: PASS` or `VERDICT: FAIL: <reason>`. Requires the `claude` CLI on PATH (else exit 127). |
-| **`<absolute path>`** (or shell-prefixed: `env FOO=bar /path/to/check.sh`) | a subprocess spawned by `pm finished` | receives env `PM_TASK`, `PM_REPORT_SHA`, `PM_QUEUE`, `PM_SLUG`, `PM_VERIFIER` plus positional `<task-sha> <report-sha>`. Exit 0 = pass; non-zero = fail; verifier_summary captures stdout + stderr (truncated). |
-
-The verifier outcome (command, exit code, summary, timeout flag) is recorded as attributes on the closing `TaskStatus(done)` — the audit chain documents who checked the work and what they observed. The same attributes ride along on `--skip-verifier` close-outs (with `verifier_exit = -1`) so a downstream auditor can spot bypasses. `VerifierGateOnDone` and `VerifyRequiresWorkingReport` are formally verified.
+**Numbers**: 67 invariants verified across 10 Alloy modules, 94 unbounded inductive lemmas across 6 Dafny ports, 47 golden integration flows. Re-run instructions in [Verifying the models](#verifying-the-models).
 
 ---
 
 ## Verifying the models
 
-The repo carries **ten Alloy modules** and **six Dafny ports** of the planning protocol, verified with the [`formal-modeling`](https://github.com/in8finity/claude-plugin) skill's bundled `verify.sh` runner — a single dispatcher that routes `.als` files through Alloy 6 and `.dfy` files through Dafny + Z3.
+The repo carries 10 Alloy modules and 6 Dafny ports of the planning protocol, verified with the [`formal-modeling`](https://github.com/in8finity/claude-plugin) skill's bundled `verify.sh` runner — a single dispatcher that routes `.als` files through Alloy 6 and `.dfy` files through Dafny + Z3.
 
 ### What you need
 
@@ -168,7 +171,7 @@ claude plugin install morozov-claude-plugin
 #   ~/.claude/plugins/cache/morozov-claude-plugin/formal-methods/<version>/skills/formal-modeling/scripts/verify.sh
 ```
 
-Or run Alloy/Dafny directly if you'd rather not depend on the plugin (`alloy` JAR + `dafny verify`). The repo's models are vanilla Alloy 6 / Dafny — no Claude-specific bindings.
+Or run Alloy/Dafny directly (`alloy` JAR + `dafny verify`). The repo's models are vanilla Alloy 6 / Dafny — no Claude-specific bindings.
 
 ### Re-running everything
 
@@ -199,16 +202,14 @@ bash $verify system-models/planning_reclaim_cascade.dfy       # RC1-RC6 (25 veri
 python3 tests/integration/test_golden.py                      # 47 golden flows
 ```
 
-**Totals**: Alloy **67/67 checks**; Dafny **94 verified** across 6 files; integration **47/47 flows**. The Alloy↔Dafny coverage diff is in `system-models/reports/alloy-dafny-reconciliation.md`.
-
 To reproduce the historical slug-race counterexample, swap `commitPlan[p]` for `commitPlanBuggy[p]` in `planning_plan_race.als`'s `Transitions` fact and re-run; the counterexample re-appears in 4 steps.
 
 ### Why two formalisms
 
-- **Alloy** — bounded model checker. Generates concrete counterexamples within a scope (`for 4 but 8 steps`), excellent for design exploration and showing stakeholders "here's the trace where the system breaks." Fast iteration, visual.
-- **Dafny** — inductive theorem prover over Z3. Proves properties for traces of *any length*. Slower to write but stronger guarantee — once a Dafny lemma passes, no scope-exhaustion concern. Doesn't generate counterexamples; you have to know the property you want.
+- **Alloy** — bounded model checker. Generates concrete counterexamples within a scope (`for 4 but 8 steps`), excellent for design exploration. Fast iteration, visual.
+- **Dafny** — inductive theorem prover over Z3. Proves properties for traces of *any length*. Slower to write but no scope-exhaustion concern. Doesn't generate counterexamples; you have to know the property you want.
 
-The convention in this repo: **Alloy first** (find the right property, see counterexamples, validate scope), then **port to Dafny** for unbounded confidence. The ten Alloy modules and six Dafny ports both verify the same surface; the cross-formalism table tracks which lives where.
+Convention in this repo: **Alloy first** (find the right property, see counterexamples, validate scope), then **port to Dafny** for unbounded confidence.
 
 ---
 
@@ -247,7 +248,7 @@ In short: `hashharness-pm` is a small, storage-first coordination layer for para
 
 ## Threat model
 
-The formal model verifies the protocol assuming every state transition goes through `pm`. A client writing directly to hashharness via MCP can bypass most assertions (state-machine ordering, proof-of-work, dep gate, sticky-context check, verifier gate). What survives a bypass is the storage layer: item immutability, schema link types, link-target existence, `text_sha256` uniqueness on the canonical slug key, and `chain_predecessor` head-move enforcement on `prevStatus` / `prevReport` / `prevHeartbeat` (so even a bypass can't double-claim or fork a chain).
+The protocol is verified assuming every state transition goes through `pm`. A client writing directly to hashharness via MCP can bypass most assertions (state-machine ordering, proof-of-work, dep gate, sticky-context check, verifier gate). What survives a bypass is the storage layer: item immutability, schema link types, link-target existence, `text_sha256` uniqueness on the canonical slug key, and `chain_predecessor` head-move enforcement on `prevStatus` / `prevReport` / `prevHeartbeat` (so even a bypass can't double-claim or fork a chain).
 
 For cooperative-agent usage (the actual use case), convention is sufficient. See `system-models/reports/planning-reconciliation.md#threat-model` for hardening options if adversarial bypass becomes a concern.
 
