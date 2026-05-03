@@ -1044,6 +1044,85 @@ def g32_reclaim_refuses_non_working_root() -> None:
               f"G32 RC6: reclaim of `done` must exit 6; got {p.returncode}")
 
 
+def g33_parent_gated_by_pending_children() -> None:
+    """G33: `pm next` skips a parent task whose children aren't all in
+    a terminal status (done / rejected / superseded). Models the
+    parent-rolls-up-children gate verified by
+    system-models/planning_parent_gate.als#ParentBlockedByPendingChild.
+    """
+    q = fresh_queue("g33")
+    par = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "parent",
+                        env_extra={"PM_WORKDIR": ""})
+                     .stdout)["task"]["text_sha256"]
+    # Spawn two children with parent kept in `new`. plan.py only needs
+    # the parent to have *any* latest_status (the genesis new is fine).
+    json.loads(pm("plan", "--queue", q, "--title", "K1", "--text", "k1",
+                  "--parent", par, env_extra={"PM_WORKDIR": ""}).stdout)
+    json.loads(pm("plan", "--queue", q, "--title", "K2", "--text", "k2",
+                  "--parent", par, env_extra={"PM_WORKDIR": ""}).stdout)
+
+    assert_eq(store.status_value(store.latest_status(par)), "new",
+              "G33 parent stays `new` (never claimed)")
+
+    # pm next must return one of the kids, NOT the parent — even though
+    # parent is older (created first) and would otherwise win the order.
+    nxt = json.loads(pm("next", "--queue", q,
+                        env_extra={"PM_WORKDIR": ""}).stdout)
+    assert nxt is not None, "G33 expected a runnable kid, got null"
+    nxt_slug = (nxt.get("attributes") or {}).get("slug")
+    assert nxt_slug in ("k1", "k2"), \
+        f"G33 expected k1 or k2 (a child), got slug={nxt_slug!r}"
+
+
+def g34_parent_unblocks_after_children_settle() -> None:
+    """G34: once every child is in a terminal status (mix done +
+    rejected to also exercise the rejected-is-terminal branch), the
+    parent becomes runnable. Models the dual of G33; verified by
+    system-models/planning_parent_gate.als#ParentRunnableAfterChildrenSettle
+    and #RejectedChildIsTerminalForGate.
+    """
+    q = fresh_queue("g34")
+    par = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "parent",
+                        env_extra={"PM_WORKDIR": ""})
+                     .stdout)["task"]["text_sha256"]
+    kid1 = json.loads(pm("plan", "--queue", q, "--title", "K1", "--text", "k1",
+                         "--parent", par, env_extra={"PM_WORKDIR": ""})
+                      .stdout)["task"]["text_sha256"]
+    kid2 = json.loads(pm("plan", "--queue", q, "--title", "K2", "--text", "k2",
+                         "--parent", par, env_extra={"PM_WORKDIR": ""})
+                      .stdout)["task"]["text_sha256"]
+
+    # Drive kid1 → done, kid2 → rejected.
+    pm("executing", "--task", kid1)
+    pm("report", "--task", kid1, "--title", "k1 ok", "--text", "ok")
+    pm("finished", "--task", kid1)
+    pm("executing", "--task", kid2)
+    pm("report", "--task", kid2, "--title", "k2 fail", "--text", "x")
+    pm("finished", "--task", kid2, "--rejected")
+
+    # Parent should now be returned by pm next.
+    nxt = json.loads(pm("next", "--queue", q,
+                        env_extra={"PM_WORKDIR": ""}).stdout)
+    assert nxt is not None, "G34 expected the parent to be runnable, got null"
+    assert_eq(nxt["text_sha256"], par,
+              "G34 expected parent to be next once children are terminal")
+
+
+def g35_childless_task_still_runnable() -> None:
+    """G35: backward-compat — a flat queue (no parent links) is unchanged
+    by the new gate. Closes the regression risk for depth-0 runs.
+    Mirrors planning_parent_gate.als#ChildlessNewTaskRunnable.
+    """
+    q = fresh_queue("g35")
+    a = json.loads(pm("plan", "--queue", q, "--title", "A", "--text", "a",
+                      env_extra={"PM_WORKDIR": ""})
+                   .stdout)["task"]["text_sha256"]
+    nxt = json.loads(pm("next", "--queue", q,
+                        env_extra={"PM_WORKDIR": ""}).stdout)
+    assert nxt is not None and nxt["text_sha256"] == a, \
+        "G35 childless task must remain runnable"
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -1082,6 +1161,9 @@ ALL_FLOWS = {
     "G30": g30_reclaim_cascade_three_deep_transitive,
     "G31": g31_reclaim_cascade_isolates_sibling,
     "G32": g32_reclaim_refuses_non_working_root,
+    "G33": g33_parent_gated_by_pending_children,
+    "G34": g34_parent_unblocks_after_children_settle,
+    "G35": g35_childless_task_still_runnable,
 }
 
 
