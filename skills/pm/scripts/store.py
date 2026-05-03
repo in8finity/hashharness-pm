@@ -648,6 +648,51 @@ def find_dependency_ancestors(task_sha: str) -> list[str]:
     return out
 
 
+def find_dependency_descendants(task_sha: str) -> list[str]:
+    """Return all descendant task ``text_sha256`` values — i.e. every
+    task in the same queue that transitively lists ``task_sha`` in its
+    ``links.dependsOn``. The reverse of :func:`find_dependency_ancestors`.
+
+    Used by replan.py's ``--cascade-down`` mode to invalidate downstream
+    consumers when a task's output changes (the task whose data they
+    were built on has been redone, so they're now stale).
+
+    Topological order: closest descendant first, deepest last. Cycles
+    broken by a visited set (the dependsOn graph is enforced acyclic at
+    plan time, but the visited guard is cheap insurance).
+    """
+    root = get_task(task_sha)
+    if root is None:
+        return []
+    queue = (root.get("attributes") or {}).get("queue", "default")
+    tasks = list_tasks(queue)
+    record_to_text = {t["record_sha256"]: t["text_sha256"] for t in tasks}
+
+    # Reverse index: for each task, who lists it in dependsOn?
+    consumers_of: dict[str, list[str]] = {}
+    for t in tasks:
+        sha = t["text_sha256"]
+        for d_record in (t.get("links") or {}).get("dependsOn") or []:
+            d_text = record_to_text.get(d_record)
+            if d_text is None:
+                continue
+            consumers_of.setdefault(d_text, []).append(sha)
+
+    out: list[str] = []
+    visited: set[str] = {task_sha}
+
+    def walk(sha: str) -> None:
+        for c in consumers_of.get(sha, ()):
+            if c in visited:
+                continue
+            visited.add(c)
+            out.append(c)
+            walk(c)
+
+    walk(task_sha)
+    return out
+
+
 def reclaim(
     task_sha: str,
     *,

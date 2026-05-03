@@ -1164,6 +1164,64 @@ def g36_bulk_plan_chain_siblings() -> None:
               f"G36 expected k1 first under chained-sibling order; got {nxt_slug!r}")
 
 
+def g37_replan_cascade_down() -> None:
+    """G37: pm replan --cascade-down resets every dep-chain descendant
+    that's currently terminal back to `new`. In-flight descendants
+    (new/working) are skipped. Models the dual of cascade-up; verified
+    by system-models/planning_replan.als#R9 and #R11.
+    """
+    q = fresh_queue("g37")
+    # s1 → s2 → s3 chain via depends_on; all driven to done.
+    s1 = json.loads(pm("plan", "--queue", q, "--title", "S1", "--text", "x",
+                       env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    s2 = json.loads(pm("plan", "--queue", q, "--title", "S2", "--text", "x",
+                       "--depends-on", s1,
+                       env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    s3 = json.loads(pm("plan", "--queue", q, "--title", "S3", "--text", "x",
+                       "--depends-on", s2,
+                       env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    for sha in (s1, s2, s3):
+        pm("executing", "--task", sha)
+        pm("report", "--task", sha, "--title", "ok", "--text", "ok")
+        pm("finished", "--task", sha)
+    assert_eq(store.status_value(store.latest_status(s2)), "done", "G37 s2 done before replan")
+    assert_eq(store.status_value(store.latest_status(s3)), "done", "G37 s3 done before replan")
+
+    # Replan s1 with cascade-down (no cascade-up: s1 has no upstream).
+    pm("replan", "--task", s1, "--no-cascade-up", "--cascade-down")
+
+    # Both descendants must now be `new` again.
+    for label, sha in (("s1", s1), ("s2", s2), ("s3", s3)):
+        cur = store.status_value(store.latest_status(sha))
+        assert_eq(cur, "new",
+                  f"G37 {label} should be `new` after cascade-down; got {cur!r}")
+
+
+def g38_replan_cascade_down_skips_inflight() -> None:
+    """G38: cascade-down skips descendants that are currently `new` or
+    `working` — they'll naturally observe the target's state when their
+    own dep gate is checked. Verified by planning_replan.als#R10.
+    """
+    q = fresh_queue("g38")
+    s1 = json.loads(pm("plan", "--queue", q, "--title", "S1", "--text", "x",
+                       env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    s2 = json.loads(pm("plan", "--queue", q, "--title", "S2", "--text", "x",
+                       "--depends-on", s1,
+                       env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    pm("executing", "--task", s1)
+    pm("report", "--task", s1, "--title", "ok", "--text", "ok")
+    pm("finished", "--task", s1)
+    # s2 stays `new` — never claimed.
+
+    out = json.loads(pm("replan", "--task", s1,
+                        "--no-cascade-up", "--cascade-down").stdout)
+    descs = out.get("descendants") or []
+    assert len(descs) == 1, f"G38 expected 1 descendant entry, got {descs!r}"
+    assert descs[0].get("skipped") is True, \
+        f"G38 expected the in-flight (`new`) descendant to be skipped; got {descs[0]!r}"
+    assert_eq(descs[0].get("current"), "new", "G38 skipped descendant current=new")
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -1206,6 +1264,8 @@ ALL_FLOWS = {
     "G34": g34_parent_unblocks_after_children_settle,
     "G35": g35_childless_task_still_runnable,
     "G36": g36_bulk_plan_chain_siblings,
+    "G37": g37_replan_cascade_down,
+    "G38": g38_replan_cascade_down_skips_inflight,
 }
 
 

@@ -172,6 +172,21 @@ pred replan_cascade_up[t: Task] {
     frameTasks[t.^deps]
 }
 
+// Cascade-down: reset every dep-chain descendant that is currently
+// terminal. Descendants are tasks d such that t ∈ d.^deps (reverse of
+// the ancestor walk). Same all-at-once atomic step as cascade-up;
+// runtime ordering doesn't matter because each reset appends to a
+// distinct chain. Used when the target's output is now stale and
+// downstream consumers must rebuild on the new output.
+pred replan_cascade_down[t: Task] {
+  let descs = { d: Task | t in d.^deps } & { d: Task | isTerminal[d] } |
+    some descs and                          // need at least one to reset
+    Pending' = Pending and
+    (all d: descs | d.phase' = PNew) and    // R9: all terminal descendants → PNew
+    (all d: { d: Task | t in d.^deps } - descs | d.phase' = d.phase) and  // R10
+    frameTasks[{ d: Task | t in d.^deps }]
+}
+
 pred stutter {
   Pending' = Pending and (all t: Task | t.phase' = t.phase)
 }
@@ -185,6 +200,7 @@ fact Transitions {
     or (some t: Task | replan_reset[t])
     or (some orig, c: Task | replan_supersede_clone[orig, c])
     or (some t: Task | replan_cascade_up[t])
+    or (some t: Task | replan_cascade_down[t])
   )
 }
 
@@ -237,6 +253,33 @@ assert R8_CascadeUpSkipsNonTerminal {
       (all a: t.^deps | (not isTerminal[a] => after a.phase = a.phase))
 }
 check R8_CascadeUpSkipsNonTerminal for 4 but 8 steps
+
+assert R9_CascadeDownResetsTerminalDescendants {
+  always all t: Task |
+    replan_cascade_down[t] =>
+      (all d: { d: Task | t in d.^deps } | (isTerminal[d] => after isNew[d]))
+}
+check R9_CascadeDownResetsTerminalDescendants for 4 but 8 steps
+
+assert R10_CascadeDownSkipsNonTerminal {
+  always all t: Task |
+    replan_cascade_down[t] =>
+      (all d: { d: Task | t in d.^deps } |
+        (not isTerminal[d] => after d.phase = d.phase))
+}
+check R10_CascadeDownSkipsNonTerminal for 4 but 8 steps
+
+// R11: cascade-down is the symmetric counterpart of cascade-up — for any
+// edge x → y (x depends on y) where both are terminal, replanning y with
+// cascade-down resets x; replanning x with cascade-up resets y. This
+// captures the duality and guards against an asymmetric implementation.
+assert R11_CascadeDirectionsAreDual {
+  always all t, u: Task |
+    (t in u.^deps and isTerminal[t] and isTerminal[u]) =>
+      ((replan_cascade_down[t] => after isNew[u])
+       and (replan_cascade_up[u] => after isNew[t]))
+}
+check R11_CascadeDirectionsAreDual for 4 but 8 steps
 
 // ===== Liveness scenarios =====
 

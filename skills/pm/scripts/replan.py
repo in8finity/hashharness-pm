@@ -15,11 +15,28 @@ to be redone, possibly with adjustments. Two operating modes:
     original. Append ``TaskStatus(superseded)`` to the original (a new
     terminal status that excludes it from the queue forever).
 
-By default ``replan`` walks the target's ``links.dependsOn`` ancestors
-recursively and resets every ancestor that is currently ``done`` or
-``rejected`` back to ``new`` (in-place — ancestor adjustments are not
-supported here; replan each ancestor separately if you need to edit
-them). Use ``--no-cascade-up`` to limit the operation to the target.
+Three cascade modes (pick by failure shape, not by habit):
+
+  - **cascade-up** (default): walk the target's ``links.dependsOn``
+    ancestors recursively and reset every ancestor that's currently
+    ``done`` or ``rejected`` back to ``new``. Use when you suspect the
+    target failed because *upstream output is wrong* — bad ideas → bad
+    cross-refs, stale model output → broken downstream parsing. The
+    whole upstream chain is re-derived before the target runs again.
+
+  - **no-cascade** (``--no-cascade-up``): just reset the target. Use
+    when the failure was *transient or environmental* — sandbox died,
+    network blip, OOM, agent crashed mid-step. The target's inputs
+    were fine; it just didn't get to do its work. **This is the right
+    default for "I need to re-run this one task" — most replans.**
+
+  - **cascade-down** (``--cascade-down``): also reset every task that
+    transitively lists the target in its ``dependsOn`` (the consumers
+    of the target's output). Use when the target's *output is now
+    invalid* and downstream artifacts built on it are stale —
+    classic case: you fixed a bug in step 3, so steps 4/5/6 (which
+    consumed step 3's output) need to redo. Combine with cascade-up
+    if both upstream re-derivation and downstream invalidation apply.
 
 Note: replan never rewrites the dependsOn graph. Ancestors keep their
 original sha (in-place reset doesn't change identity); the new target
@@ -29,7 +46,7 @@ since the ancestor shas haven't changed — they've just gone back to
 
 Usage:
   replan.py --task SHA [--text "new body"] [--verifier "..."]
-            [--no-cascade-up] [--note "..."]
+            [--no-cascade-up] [--cascade-down] [--note "..."]
 
 Exit codes:
   0  replan succeeded
@@ -152,7 +169,17 @@ def main() -> int:
     p.add_argument("--verifier", default=None,
                    help="adjusted verifier for the target (creates a new Task)")
     p.add_argument("--no-cascade-up", action="store_true",
-                   help="limit replan to the target only; don't reset ancestors")
+                   help="don't reset upstream ancestors. Right when the "
+                        "failure was sandbox/transient — target's inputs "
+                        "were fine, it just didn't run. Most replans should "
+                        "set this; cascade-up only when upstream output is "
+                        "actually suspect.")
+    p.add_argument("--cascade-down", action="store_true",
+                   help="also reset every task transitively depending on "
+                        "the target. Use when target's output is now stale "
+                        "and downstream consumers must rebuild (e.g. after "
+                        "fixing a bug in an upstream step). Skips already-"
+                        "in-flight descendants (new/working).")
     p.add_argument("--note", default="")
     args = p.parse_args()
 
@@ -167,7 +194,12 @@ def main() -> int:
         )
         return 6
 
-    out: dict[str, Any] = {"target": args.task, "ancestors": [], "target_result": None}
+    out: dict[str, Any] = {
+        "target": args.task,
+        "ancestors": [],
+        "descendants": [],
+        "target_result": None,
+    }
 
     # Cascade up first so by the time the (possibly new) target task
     # becomes runnable, its dependencies are already reset.
@@ -183,6 +215,31 @@ def main() -> int:
                 continue
             res = reset_in_place(anc_sha, args.note)
             out["ancestors"].append({"task": anc_sha, **{
+                k: v for k, v in res.items()
+                if k in ("text_sha256", "created_at", "skipped", "current")
+            }})
+
+    # Cascade down: invalidate downstream consumers whose output was
+    # built on the target. Done AFTER the target's own reset/clone so
+    # the descendants pick up the new target sha if it changed (clone
+    # path) — though in current semantics dependsOn isn't rewritten,
+    # so the descendants will still gate on the original sha which has
+    # gone superseded; that's the right blocking behavior to force the
+    # user to also rewrite the descendants' depends_on if they actually
+    # want them to run against the new clone.
+    if args.cascade_down:
+        for desc_sha in store.find_dependency_descendants(args.task):
+            desc_cur = store.status_value(store.latest_status(desc_sha))
+            if desc_cur not in ("done", "rejected"):
+                # Skip in-flight / not-yet-run descendants — they'll
+                # naturally observe the target's new state when their
+                # own dep gate is checked.
+                out["descendants"].append({
+                    "task": desc_sha, "skipped": True, "current": desc_cur,
+                })
+                continue
+            res = reset_in_place(desc_sha, args.note)
+            out["descendants"].append({"task": desc_sha, **{
                 k: v for k, v in res.items()
                 if k in ("text_sha256", "created_at", "skipped", "current")
             }})
