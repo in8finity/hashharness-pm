@@ -17,18 +17,22 @@ to be redone, possibly with adjustments. Two operating modes:
 
 Three cascade modes (pick by failure shape, not by habit):
 
-  - **cascade-up** (default): walk the target's ``links.dependsOn``
-    ancestors recursively and reset every ancestor that's currently
-    ``done`` or ``rejected`` back to ``new``. Use when you suspect the
-    target failed because *upstream output is wrong* — bad ideas → bad
-    cross-refs, stale model output → broken downstream parsing. The
-    whole upstream chain is re-derived before the target runs again.
+  - **no cascade (DEFAULT)**: just reset the target. Use when the
+    failure was *transient or environmental* — sandbox died, network
+    blip, OOM, agent crashed mid-step. The target's inputs were fine;
+    it just didn't get to do its work. This is the most common case;
+    cascading was a wrong default that auto-reset healthy upstream
+    work. **The flags ``--no-cascade`` and ``--no-cascade-up`` are
+    accepted as no-op aliases for back-compat.**
 
-  - **no-cascade** (``--no-cascade``, alias ``--no-cascade-up``): just reset the target. Use
-    when the failure was *transient or environmental* — sandbox died,
-    network blip, OOM, agent crashed mid-step. The target's inputs
-    were fine; it just didn't get to do its work. **This is the right
-    default for "I need to re-run this one task" — most replans.**
+  - **cascade-up** (``--cascade-up``): walk the target's
+    ``links.dependsOn`` ancestors recursively and reset every ancestor
+    that's currently ``done`` or ``rejected`` back to ``new``. Use
+    when you suspect the target failed because *upstream output is
+    wrong* — bad ideas → bad cross-refs, stale model output → broken
+    downstream parsing. The whole upstream chain is re-derived before
+    the target runs again. **Was the default before this change;
+    explicit opt-in now.**
 
   - **cascade-down** (``--cascade-down``): also reset every task that
     transitively lists the target in its ``dependsOn`` (the consumers
@@ -56,7 +60,7 @@ since the ancestor shas haven't changed — they've just gone back to
 
 Usage:
   replan.py --task SHA [--text "new body"] [--verifier "..."]
-            [--no-cascade] [--cascade-down] [--cascade-down-parents] [--note "..."]
+            [--cascade-up] [--cascade-down] [--cascade-down-parents] [--note "..."]
 
 Exit codes:
   0  replan succeeded
@@ -178,14 +182,21 @@ def main() -> int:
                    help="adjusted body for the target (creates a new Task)")
     p.add_argument("--verifier", default=None,
                    help="adjusted verifier for the target (creates a new Task)")
+    # --no-cascade / --no-cascade-up are back-compat aliases. Since the
+    # default is now no-cascade, they're no-ops; accepted so existing
+    # scripts and allowlist entries keep working unchanged. dest is
+    # `legacy_no_cascade` and the value is ignored.
     p.add_argument("--no-cascade", "--no-cascade-up",
-                   dest="no_cascade", action="store_true",
-                   help="don't reset upstream ancestors. Right when the "
-                        "failure was sandbox/transient — target's inputs "
-                        "were fine, it just didn't run. Most replans should "
-                        "set this; cascade-up only when upstream output is "
-                        "actually suspect. (--no-cascade-up is a back-compat "
-                        "alias.)")
+                   dest="legacy_no_cascade", action="store_true",
+                   help="(deprecated, no-op) — no-cascade is now the "
+                        "default; this flag is accepted as a back-compat "
+                        "alias for older scripts and allowlists.")
+    p.add_argument("--cascade-up", action="store_true",
+                   help="reset upstream ancestors (currently `done`/"
+                        "`rejected`) along the dependsOn chain. Use when "
+                        "you suspect upstream output is wrong and the "
+                        "whole chain needs re-derivation. Previously the "
+                        "default; now an explicit opt-in.")
     p.add_argument("--cascade-down", action="store_true",
                    help="also reset every task transitively depending on "
                         "the target. Use when target's output is now stale "
@@ -229,7 +240,7 @@ def main() -> int:
 
     # Cascade up first so by the time the (possibly new) target task
     # becomes runnable, its dependencies are already reset.
-    if not args.no_cascade:
+    if args.cascade_up:
         for anc_sha in store.find_dependency_ancestors(args.task):
             anc_cur = store.status_value(store.latest_status(anc_sha))
             if anc_cur not in ("done", "rejected"):

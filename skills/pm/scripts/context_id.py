@@ -10,10 +10,25 @@ Usage:
   pm context-id            # bare UUID — for capturing into env
   pm context-id --export   # `export PM_CONTEXT_ID=<uuid>` — eval-friendly
 
-Typical worker setup:
-  export PM_CONTEXT_ID=$(pm context-id)
-  # or
-  eval "$(pm context-id --export)"
+Two ways to thread it into pm subcommands — pick by execution context:
+
+  Interactive shell (humans):
+      export PM_CONTEXT_ID=$(pm context-id)
+      pm executing --task ...
+      pm report    --task ...
+
+  Sub-agents under a permission allowlist:
+      Use the --context-id flag, or inline-env, NOT export-then-call.
+      A pattern like `Bash(pm executing *)` won't match `export X=Y;
+      pm executing ...` (different command shape) and the sub-agent
+      gets a permission denial it can't recover from. Both of these
+      DO match an allowlist for `pm executing`:
+
+          pm executing --task TASK --context-id $CTX
+          PM_CONTEXT_ID=$CTX pm executing --task TASK
+
+      Mint the context once at the orchestrator, pass it down as an
+      explicit string the sub-agents stamp onto each call.
 """
 from __future__ import annotations
 

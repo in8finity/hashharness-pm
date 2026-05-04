@@ -112,3 +112,40 @@ it).
 Workers stop when `pm next` returns `null`. The orchestrator (you) waits
 for all `N` agents to complete and then summarizes: tasks done, tasks
 rejected, tasks left (should be zero or blocked-on-deps).
+
+### Permission allowlist gotchas (sub-agent invocation)
+
+Sub-agents typically run under a permission allowlist that constrains
+which Bash commands they can execute. Two patterns reliably break a
+worker the FIRST time it runs `pm next`; both are subtle and hard to
+diagnose from the worker's side ("Permission denied" looks identical
+to "your environment is broken"):
+
+1. **Trailing space-star requires args.** `Bash(pm next *)` matches
+   `pm next --queue Q` but NOT bare `pm next` (no args). If your
+   workers might call `pm next` with no flags, allowlist BOTH:
+
+       Bash(pm next)
+       Bash(pm next *)
+
+   The same holds for any `pm` verb the worker calls without args.
+
+2. **`export X=Y; pm ...` chains don't match `Bash(pm ...)`.** The
+   allowlist matches the *literal command shape*. A multi-statement
+   chain is a different shape. Two patterns that DO match:
+
+       pm executing --task TASK --context-id "$CTX"           # ← inline flag
+       PM_CONTEXT_ID="$CTX" pm executing --task TASK           # ← inline env
+
+   And one that does NOT:
+
+       export PM_CONTEXT_ID="$CTX"; pm executing --task TASK   # ← chain
+
+   For sticky-context work, mint the context once at the orchestrator
+   and pass it down as an explicit `--context-id` flag in the worker
+   prompt template — never tell the worker to `export` it themselves.
+
+A "dry-run permission check" helper would catch this in 1 second; in
+the meantime, when a worker dies on the first `pm next` and the error
+mentions "Permission to use Bash has been denied", check the allowlist
+shape against the actual command form before assuming an env bug.

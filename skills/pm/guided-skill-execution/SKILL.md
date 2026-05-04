@@ -157,14 +157,31 @@ the array) exits 7 with a specific error before any partial damage.
 For one-off mid-step subtasks (Phase 2, item 4 below), `pm plan` is
 fine — the prompt cost is paid once per subtask, not per chain.
 
-Task body MUST contain:
+Task body MUST contain ALL of these — workers read the body in
+isolation and have no other channel to learn what step they're on:
+
 - `Driving skill: <skill>` and `Step number: <n>` and `Step title: <title>`.
 - `Prompt: <prompt>` (the original problem statement).
 - `Skill anchor:` quoting the matched line from the SKILL.md (the `anchor`
   field from the extractor) so a worker can grep back to the source.
+- **`Step spec:`** — the verbatim text of the step from the source SKILL.md
+  (or, if the step's body is huge, a tight 2-3 sentence paraphrase of
+  what the step prescribes plus a `(see <skill_path>#<anchor>)` pointer).
+  Without this, the worker has to re-discover the contract by reading
+  the source skill themselves on every run.
 - `Mode: guided` (so the worker knows to pause for user input at gates).
 - `Workdir: <workdir>`.
-- `Reference: <skill_path>` so the worker can read the full skill text.
+- `Reference: <skill_path>` — absolute path so the worker can read the
+  full skill text when the inline spec isn't enough.
+
+**Anti-pattern (caught in real-world feedback):** do NOT emit
+`"Substep EIAC-S7."` (or any single-line placeholder) as the body and
+expect the worker to re-derive the contract from the slug. The body
+IS the spec; an empty body means every worker has to round-trip
+through the source SKILL.md, which defeats the queue's audit value
+and burns context unnecessarily. If you find yourself writing a body
+shorter than the JSON spec for the bulk-plan entry, you're under-
+specifying the task.
 
 Record each task's `text_sha256`. The `--depends-on` flag links each step
 to the previous one — the queue is a strict chain, not parallel work.
@@ -248,3 +265,10 @@ After the last step is `done`, present:
   ambiguous text to the user and ask which interpretation to apply.
 - **The user goes silent at a gate.** Do not infer agreement. Ask once
   more, then if still no reply, mark the queue paused and report status.
+- **Sub-agent dies on first `pm next` with "permission denied".** This
+  is almost always one of two allowlist shape mismatches — see
+  `pm-execute/SKILL.md` ("Permission allowlist gotchas"). Short
+  version: `Bash(pm next *)` doesn't match bare `pm next` (no args),
+  and `export X=Y; pm ...` chains don't match `Bash(pm ...)`. For
+  sticky work, always pass `--context-id <ctx>` inline; never tell
+  the worker to `export PM_CONTEXT_ID` themselves.

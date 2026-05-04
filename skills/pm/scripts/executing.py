@@ -74,8 +74,11 @@ def main() -> int:
     if is_sticky:
         if not agent_context:
             sys.stderr.write(
-                f"refusing: task {args.task[:12]} is sticky but PM_CONTEXT_ID is not set. "
-                f"Set it via: export PM_CONTEXT_ID=$(pm context-id)\n"
+                f"refusing: task {args.task[:12]} is sticky but no "
+                f"context_id was provided.\n"
+                f"  Pass it inline:  pm executing --task {args.task[:12]} --context-id <uuid>\n"
+                f"  Or via env:      PM_CONTEXT_ID=<uuid> pm executing --task {args.task[:12]}\n"
+                f"  Mint a fresh one with: pm context-id\n"
             )
             return 10
         try:

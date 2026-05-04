@@ -280,7 +280,10 @@ def g6_claim_race() -> None:
 
 def g7_replan_modes() -> None:
     """G7: in one chain exercise replan's four code paths — in-place
-    reset, --no-cascade-up, default cascade-up, supersede+clone."""
+    reset, default no-cascade, explicit --cascade-up, supersede+clone.
+    NOTE: the default flipped to no-cascade in this commit cycle.
+    --cascade-up is now the explicit opt-in; --no-cascade and
+    --no-cascade-up are accepted as no-op back-compat aliases."""
     q = fresh_queue("g7")
     a = json.loads(pm("plan", "--queue", q, "--title", "A", "--text", "stage 1",
                       env_extra={"PM_WORKDIR": ""}
@@ -312,12 +315,12 @@ def g7_replan_modes() -> None:
     pm("report", "--task", b, "--title", "fail2", "--text", "borked2")
     pm("finished", "--task", b, "--rejected")
 
-    # (b) Default cascade-up: B AND A both reset.
-    pm("replan", "--task", b)
+    # (b) Explicit --cascade-up: B AND A both reset.
+    pm("replan", "--task", b, "--cascade-up")
     assert_eq(store.status_value(store.latest_status(b)), "new",
               "G7b B reset")
     assert_eq(store.status_value(store.latest_status(a)), "new",
-              "G7b A also reset by default cascade-up")
+              "G7b A also reset by explicit --cascade-up")
 
     # Drive A done again, then supersede+clone B with edits.
     pm("executing", "--task", a)
@@ -1257,6 +1260,28 @@ def g40_replan_cascade_down_parents() -> None:
               "G40 k3 (deps-descendant of k2) reset")
 
 
+def g49_default_replan_no_cascades() -> None:
+    """G49: bare `pm replan --task X` (no flags) defaults to NO cascade
+    after the default flip. Previously cascade-up was the default —
+    this test pins the new behavior so a regression is loud."""
+    q = fresh_queue("g49")
+    a = json.loads(pm("plan", "--queue", q, "--title", "A", "--text", "stage 1",
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    b = json.loads(pm("plan", "--queue", q, "--title", "B", "--text", "stage 2",
+                      "--depends-on", a,
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    for sha in (a, b):
+        pm("executing", "--task", sha)
+        pm("report", "--task", sha, "--title", "ok", "--text", "ok")
+        pm("finished", "--task", sha)
+    # Bare replan: only target resets, A stays done.
+    pm("replan", "--task", b)
+    assert_eq(store.status_value(store.latest_status(b)), "new",
+              "G49 B reset (target)")
+    assert_eq(store.status_value(store.latest_status(a)), "done",
+              "G49 A must NOT cascade-reset under new default")
+
+
 def g47_finished_enforces_full_sticky_chain() -> None:
     """G47: pm finished must use the full check_sticky_eligibility chain
     walk (not just the task's own latest context_id). Setup: a sticky
@@ -1575,6 +1600,7 @@ ALL_FLOWS = {
     "G46s": g46_sticky_rebinding_after_reclaim,
     "G47": g47_finished_enforces_full_sticky_chain,
     "G48": g48_heartbeat_enforces_sticky_chain,
+    "G49": g49_default_replan_no_cascades,
 }
 
 

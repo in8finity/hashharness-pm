@@ -13,7 +13,7 @@ description: >
 
 ## Procedure
 
-`../scripts/pm replan --task <sha> [--text "..."] [--verifier "..."] [--no-cascade] [--cascade-down] [--note "..."]`
+`../scripts/pm replan --task <sha> [--text "..."] [--verifier "..."] [--cascade-up] [--cascade-down] [--cascade-down-parents] [--note "..."]`
 
 ## Two modes
 
@@ -36,20 +36,22 @@ description: >
 
 Three modes — pick by failure shape, not by habit:
 
-- **cascade-up** (default): walk `links.dependsOn` upstream from the
-  target and reset every ancestor currently in `done` or `rejected`
-  back to `new`. Use when you suspect *upstream output is wrong* — bad
-  ideas → bad cross-refs, stale model output → broken downstream
-  parsing. The whole upstream chain is re-derived before the target
-  runs again. Ancestors already in `new` / `working` / `superseded`
-  are left alone.
-
-- **no-cascade** (`--no-cascade`): just reset the target. Use when the
+- **no cascade (DEFAULT)**: just reset the target. Use when the
   failure was *transient or environmental* — sandbox died, network
-  blip, OOM, agent crashed mid-step. The target's inputs were fine; it
-  just didn't get to do its work. **This is the right pick for "I need
-  to re-run this one task" — most replans.** The flag's old name
-  `--no-cascade-up` still works as a back-compat alias.
+  blip, OOM, agent crashed mid-step. The target's inputs were fine;
+  it just didn't get to do its work. **This is the most common case;
+  cascading was the wrong default that auto-reset healthy upstream
+  work.** `--no-cascade` and `--no-cascade-up` are accepted as no-op
+  aliases for back-compat with older scripts and allowlists.
+
+- **cascade-up** (`--cascade-up`): walk `links.dependsOn` upstream
+  from the target and reset every ancestor currently in `done` or
+  `rejected` back to `new`. Use when you suspect *upstream output is
+  wrong* — bad ideas → bad cross-refs, stale model output → broken
+  downstream parsing. The whole upstream chain is re-derived before
+  the target runs again. Ancestors already in `new` / `working` /
+  `superseded` are left alone. **Was the default before the flip;
+  explicit opt-in now.**
 
 - **cascade-down** (`--cascade-down`): also reset every task that
   transitively lists the target in its `dependsOn` (the consumers of
