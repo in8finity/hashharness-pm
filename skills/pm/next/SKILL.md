@@ -3,8 +3,10 @@ name: pm-next
 description: >
   Return the next runnable planning task as JSON, or "null" if the queue is
   empty / blocked. A task is runnable when its current TaskStatus is "new",
-  every task in its dependsOn list has status "done", and every direct child
-  (via parentTask) has reached a terminal status (done/rejected/superseded).
+  every task in its dependsOn list has status "done", and (if it has a
+  parentTask) the parent's status is non-"new" — i.e. the parent's
+  lifecycle has begun. Parents must be claimed before their children; the
+  rollup-after-children invariant is enforced at finish-time, not next-time.
   Use when the user says "next task", "what's next", "pull next", or before
   spawning a worker.
 ---
