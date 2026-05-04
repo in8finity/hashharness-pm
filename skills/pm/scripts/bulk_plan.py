@@ -65,6 +65,31 @@ def main() -> int:
              "parent. Top-level specs (no parent_slug) are not affected — "
              "chain those explicitly with depends_on_slugs.",
     )
+    p.add_argument(
+        "--finalize-slug", default=None, metavar="SLUG",
+        help="auto-append a finalizer task at the end of the spec with "
+             "depends_on_slugs covering every other slug in the batch. "
+             "The finalizer is the queue-level rollup — when it reaches "
+             "`done` the queue is provably finished. Use one finalizer per "
+             "queue (multiple --finalize-slug invocations across batches "
+             "create independent finalizers, which won't aggregate).",
+    )
+    p.add_argument(
+        "--finalize-title", default="Queue rollup",
+        help="title for the auto-appended finalizer task "
+             "(only used when --finalize-slug is set)",
+    )
+    p.add_argument(
+        "--finalize-text",
+        default="Queue-level rollup. This task depends on every other "
+                "task in the batch and reaches `done` only after all of "
+                "them settle. Use as the audit-of-record that the queue "
+                "completed in full. Body: read each prior task's report "
+                "and assemble a one-paragraph summary (or skip the read "
+                "if the queue's outputs are otherwise self-evident).",
+        help="text body for the auto-appended finalizer task "
+             "(only used when --finalize-slug is set)",
+    )
     args = p.parse_args()
 
     raw = sys.stdin.read() if args.input == "-" else Path(args.input).read_text()
@@ -72,6 +97,22 @@ def main() -> int:
     if not isinstance(specs, list):
         sys.stderr.write("input must be a JSON array of task specs\n")
         return 2
+
+    # Auto-append the finalizer first, BEFORE chain-siblings, so the
+    # finalizer's depends_on covers everything below.
+    if args.finalize_slug:
+        if any(s["slug"] == args.finalize_slug for s in specs):
+            sys.stderr.write(
+                f"--finalize-slug '{args.finalize_slug}' collides with a "
+                f"spec slug; pick another name or remove the explicit spec\n"
+            )
+            return 8
+        specs.append({
+            "slug": args.finalize_slug,
+            "title": args.finalize_title,
+            "text": args.finalize_text,
+            "depends_on_slugs": [s["slug"] for s in specs],
+        })
 
     # Auto-chain siblings: walk specs in order, remember the last slug
     # seen per parent_slug, and inject it into the next sibling's

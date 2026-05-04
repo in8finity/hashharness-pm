@@ -82,6 +82,33 @@ description: >
 3. Output is `{ "task": ..., "status": ... }` — record `task.text_sha256`;
    it is the identifier used by the other planning skills.
 
+### Closing a queue with a finalizer
+
+A queue is "done" when every task in it is settled. To make that
+provable as a single signal, append a **finalizer task** that depends
+on every other task in the queue. When the finalizer reaches `done`,
+you have a one-shot artifact saying "the queue completed in full" —
+useful for downstream gating, audit, or just as an unambiguous human
+checkpoint.
+
+`pm bulk-plan --finalize-slug <slug>` does this for you:
+
+```bash
+pm bulk-plan --queue Q --finalize-slug queue-rollup --input plan.json
+# auto-appends: {slug: "queue-rollup", depends_on_slugs: [<every other slug>]}
+```
+
+The finalizer's body is a generic "read each prior task's report and
+summarise" prompt; override with `--finalize-text "..."` if your queue
+needs a specific rollup. The slug must not collide with any spec
+slug (`exit 8` if it does).
+
+A queue can have at most one finalizer that aggregates **everything**.
+If you bulk-plan in multiple batches, only the first batch's finalizer
+covers the whole queue; later batches' finalizers cover only their own
+specs. For incrementally-grown queues, plan the finalizer last and
+manually edit its `depends_on_slugs` to add new tasks.
+
 ### Parents are grouping nodes — put work in children
 
 The queue convention is that **a parent task is a structural node, not

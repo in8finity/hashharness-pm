@@ -1771,6 +1771,65 @@ def g59_cancel_no_cascade_opt_out() -> None:
               "G59 B must remain working under --no-cascade")
 
 
+def g60_bulk_plan_finalize_slug() -> None:
+    """G60: `pm bulk-plan --finalize-slug X` auto-appends a finalizer
+    task X with depends_on covering every other slug in the batch. The
+    finalizer is the queue-level rollup — provably the last thing to
+    `done` because all siblings must settle before its dep gate clears."""
+    q = fresh_queue("g60")
+    spec = json.dumps([
+        {"slug": "a", "title": "A", "text": "alpha"},
+        {"slug": "b", "title": "B", "text": "beta"},
+        {"slug": "c", "title": "C", "text": "gamma"},
+    ])
+    subprocess.run(
+        [PM, "bulk-plan", "--queue", q, "--input", "-",
+         "--finalize-slug", "queue-rollup",
+         "--finalize-title", "Finalize"],
+        input=spec, text=True, capture_output=True, check=True,
+        env={**os.environ, "PM_WORKDIR": ""},
+    )
+    rollup = store.find_task_by_slug(q, "queue-rollup")
+    assert rollup is not None, "G60 finalizer task must be created"
+    deps = (rollup.get("links") or {}).get("dependsOn") or []
+    assert len(deps) == 3, \
+        f"G60 finalizer must depend on all 3 prior slugs; got {len(deps)} deps"
+
+    # pm next must NOT return queue-rollup yet — its deps aren't done.
+    nxt = json.loads(pm("next", "--queue", q,
+                        env_extra={"PM_WORKDIR": ""}).stdout)
+    assert (nxt.get("attributes") or {}).get("slug") != "queue-rollup", \
+        "G60 finalizer must be blocked while siblings pending"
+
+    # Drive a, b, c to done; finalizer becomes runnable.
+    for slug in ("a", "b", "c"):
+        sha = store.find_task_by_slug(q, slug)["text_sha256"]
+        pm("executing", "--task", sha)
+        pm("report", "--task", sha, "--title", "ok", "--text", "ok")
+        pm("finished", "--task", sha)
+    nxt = json.loads(pm("next", "--queue", q,
+                        env_extra={"PM_WORKDIR": ""}).stdout)
+    assert_eq((nxt.get("attributes") or {}).get("slug"), "queue-rollup",
+              "G60 finalizer must become runnable after all siblings settle")
+
+
+def g61_bulk_plan_finalize_slug_collision_refused() -> None:
+    """G61: `--finalize-slug` collides with an existing spec slug → exit 8."""
+    q = fresh_queue("g61")
+    spec = json.dumps([
+        {"slug": "queue-rollup", "title": "Mine", "text": "I claimed this name first"},
+    ])
+    proc = subprocess.run(
+        [PM, "bulk-plan", "--queue", q, "--input", "-",
+         "--finalize-slug", "queue-rollup"],
+        input=spec, text=True, capture_output=True,
+        env={**os.environ, "PM_WORKDIR": ""},
+    )
+    assert_eq(proc.returncode, 8,
+              f"G61 collision must exit 8; got {proc.returncode}\n"
+              f"stderr: {proc.stderr}")
+
+
 def g54_parent_chain_cycle_refused() -> None:
     """G54: NoCycle on parentTask. bulk_plan with a spec whose `parent`
     chain transitively contains the spec's own deterministic sha (slug)
@@ -1891,6 +1950,8 @@ ALL_FLOWS = {
     "G57": g57_parent_finish_succeeds_after_children_settle,
     "G58": g58_cancel_cascades_by_default,
     "G59": g59_cancel_no_cascade_opt_out,
+    "G60": g60_bulk_plan_finalize_slug,
+    "G61": g61_bulk_plan_finalize_slug_collision_refused,
 }
 
 
