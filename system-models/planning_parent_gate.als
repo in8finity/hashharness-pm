@@ -81,6 +81,31 @@ assert ParentNotFinishedWhilePendingChild {
 }
 check ParentNotFinishedWhilePendingChild for 6
 
+// ---- safety (2-level inductive invariant): SDone tasks have all
+// direct children settled. The runtime dynamics enforce this — a
+// task can only transition to SDone via finished.py, which is gated
+// on `children_settled`. We add it here as a fact so the static
+// model captures the inductive step. NOTE: this only constrains
+// SDone subtrees. SRejected / SSuperseded subtrees are NOT recursively
+// constrained — `pm cancel` (without --cascade) rejects a parent
+// but leaves grandchildren intact, and that's the correct behavior
+// (cascade-cancel is the opt-in form). ----
+fact DoneHasAllChildrenSettled {
+  all t: Task | t.status = SDone =>
+    (all c: children[t] | c.status in terminalForParent)
+}
+
+// ---- safety (2-level): on the SDone path specifically, the gate
+// recurses. If grandparent → parent → child where parent is SDone,
+// the child is settled. (If parent is SRejected / SSuperseded, no
+// such guarantee; that's the intentional gap that --cascade closes.) ----
+assert SDoneChainRecursesToGrandchildren {
+  all gp, p, c: Task |
+    (p.parent = gp and c.parent = p and p.status = SDone)
+      => c.status in terminalForParent
+}
+check SDoneChainRecursesToGrandchildren for 6
+
 // ---- liveness: a parent with pending children IS still runnable —
 // the orchestrator can pick it up to bind the lifecycle / context now,
 // and only the close is gated. ----
@@ -153,6 +178,33 @@ run ParentBlockedAtFinish {
     and #children[p] = 1
     and (some c: children[p] | c.status = SWorking)
     and not finishable[p]
+} for 4
+
+// Witness: 2-level chain (gp → p → c). gp in working; p done; c
+// still working. gp would be locally finishable (its only direct
+// child p is SDone), but the inductive fact rules out p being SDone
+// while c is pending, so this whole shape is UNSAT — the static
+// model proves the recursion holds at depth 2.
+run TryGrandparentFinishWithPendingGrandchild {
+  some disj gp, p, c: Task |
+    p.parent = gp
+    and c.parent = p
+    and gp.status = SWorking
+    and p.status = SDone
+    and c.status = SWorking
+} for 4
+expect 0
+
+// Witness: 2-level chain where every descendant is settled —
+// grandparent IS finishable.
+run GrandparentFinishableWhenChainSettled {
+  some disj gp, p, c: Task |
+    p.parent = gp
+    and c.parent = p
+    and gp.status = SWorking
+    and p.status = SDone
+    and c.status = SDone
+    and finishable[gp]
 } for 4
 
 // Find a sticky-style nested expansion (parent + 2 children, all Done) and

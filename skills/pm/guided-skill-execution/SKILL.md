@@ -130,11 +130,25 @@ pm bulk-plan --queue <queue> --chain-siblings --input /tmp/plan.json
 ```
 
 `--chain-siblings` auto-adds `depends_on` between consecutive specs
-sharing the same `parent_slug` (in array order). That makes nested
-substeps run sequentially under their parent — required for skill
-expansion, since the new parent-rolls-up-children gate (next.py)
-keeps the parent unrunnable until all its children are terminal,
-and parallel sibling claims would defeat the prescribed step order.
+sharing the same `parent_slug` (in array order). Nested substeps run
+sequentially in array order — required for skill expansion to honour
+the prescribed step order.
+
+**Parent task convention** (see `skills/pm/plan/SKILL.md` "Parents are
+grouping nodes"): under `--depth ≥1`, the top-level `steps[i]` parent
+is a **grouping/contexting node**, not a work node. Its body should
+be lightweight (the orchestrator's prompt is fine; don't ask the
+worker to do meaningful work in the parent body). All actual work
+lives in children. If the step needs a rollup/summary, add it as a
+**final child** that depends on every sibling — the rollup belongs in
+a child task, not in the parent. The parent's `pm finished` is gated:
+it cannot close until every child is in {done, rejected, superseded}
+(exit 14 otherwise).
+
+The parent IS claimable as soon as its deps are done — that's the
+sticky-context binding event. A worker can claim the parent first,
+hold the lifecycle / context lease, then process children inheriting
+the binding, then close the parent after children settle.
 
 Tree shape per spec:
 - The top-level `steps[i]` becomes a parent task (no `parent_slug`,
@@ -145,6 +159,10 @@ Tree shape per spec:
   you do NOT need to add `depends_on_slugs` between siblings — the
   flag does it for you in array order. (You can still set it
   explicitly to encode a non-array DAG.)
+- For a step that needs a summary of its subskill expansion, append
+  one extra child after the nested-step list with
+  `depends_on_slugs:["<last-nested-step-slug>"]` and a body that
+  reads the children's reports.
 - Children inherit `sticky` and `workdir` from the parent
   automatically (bulk-plan does this), so a sticky parent makes the
   whole subskill expansion sticky to the same agent context.
@@ -268,13 +286,20 @@ After the last step is `done`, present:
 - The pre-run table is the contract with the user. If the run produces
   more tasks (subtasks, replans), the post-run summary must show them
   alongside the originals so the user can see how the plan evolved.
-- **Replanning a step inside a `--depth ≥1` expansion.** If you have to
-  replan a child task (the step itself failed, the body needs adjustment),
-  the rollup parent stays `Done` by default — its summary is now stale.
-  Use `pm replan --task <child> --no-cascade --cascade-down-parents` to
-  also reset the rollup ancestor(s) so the parent re-derives its summary
-  after the child redoes. See `pm-replan/SKILL.md` for the full mode
-  matrix; the cross-feature soundness is verified in
+- **Replanning a step inside a `--depth ≥1` expansion.** Two cases:
+  - **Following the convention** (parent = grouping; rollup = final
+    child that depends on every sibling): `pm replan --task <child>
+    --cascade-down` is enough. The rollup-child is a dep-descendant
+    of the replanned child, so cascade-down catches it; the rollup
+    re-runs once the new child finishes. The grouping parent is
+    still finishable — it has nothing of its own to redo.
+  - **Legacy: rollup work in the parent body.** If the parent body
+    itself does the summary, its `Done` status is now stale. Use
+    `pm replan --task <child> --no-cascade --cascade-down-parents`
+    to also reset the rollup ancestor(s) via the parentTask chain,
+    so the parent re-derives its summary after the child redoes.
+  See `pm-replan/SKILL.md` for the full mode matrix; the
+  cross-feature soundness is verified in
   `system-models/planning_replan_with_parent_gate.als` (P6 / P7).
 
 ## Failure modes worth knowing
