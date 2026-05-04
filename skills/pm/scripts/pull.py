@@ -49,24 +49,13 @@ def main() -> int:
 
     pat = re.compile(args.regex)
 
-    TERMINAL_FOR_PARENT = {"done", "rejected", "superseded"}
-
     for attempt in range(args.max_retries + 1):
         # Re-implement next.py logic inline to avoid double round-trip.
         tasks = sorted(store.list_tasks(args.queue), key=lambda t: t.get("created_at", ""))
 
-        # Same record→text translation + children index next.py uses, so
-        # the runnable-set here matches what `pm next` would return.
+        # record→text translation matches next.py so the runnable-set
+        # here is identical to what `pm next` would return.
         record_to_text = {t["record_sha256"]: t["text_sha256"] for t in tasks}
-        children_of: dict[str, list[str]] = {}
-        for t in tasks:
-            parent_record = (t.get("links") or {}).get("parentTask")
-            if not parent_record:
-                continue
-            parent_text = record_to_text.get(parent_record)
-            if parent_text is None:
-                continue
-            children_of.setdefault(parent_text, []).append(t["text_sha256"])
 
         status_cache: dict[str, str | None] = {}
 
@@ -79,12 +68,6 @@ def main() -> int:
             d_text = record_to_text.get(d_record)
             return d_text is not None and status_of(d_text) == "done"
 
-        def children_settled(parent_sha: str) -> bool:
-            for c in children_of.get(parent_sha, ()):
-                if status_of(c) not in TERMINAL_FOR_PARENT:
-                    return False
-            return True
-
         candidate = None
         for t in tasks:
             sha = t["text_sha256"]
@@ -93,8 +76,8 @@ def main() -> int:
             deps = (t.get("links") or {}).get("dependsOn") or []
             if not all(dep_done(d) for d in deps):
                 continue
-            if not children_settled(sha):
-                continue
+            # Parent-rolls-up gate moved to finish-time (see next.py).
+            # Parents are claimable as soon as their deps are done.
             candidate = t
             break
 

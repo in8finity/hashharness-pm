@@ -82,6 +82,39 @@ description: >
 3. Output is `{ "task": ..., "status": ... }` — record `task.text_sha256`;
    it is the identifier used by the other planning skills.
 
+### Parents are grouping nodes — put work in children
+
+The queue convention is that **a parent task is a structural node, not
+a work node**. Its purpose is two things and only two things:
+
+- **Grouping**: a stable parentTask handle that ties a subtree together
+  for cancel/reclaim cascades, dashboard rollup, and rollup auditing.
+- **Contexting**: when sticky, a parent's claim is the binding event
+  for the chain — every sticky descendant must share that context.
+
+A parent's task body should be empty/trivial. **Don't put summarize-
+the-children logic in the parent's body**; put it in a final child
+that depends on every sibling:
+
+```
+P                                ← grouping/contexting parent (empty body)
+├── S1                           ← work child #1
+├── S2 depends_on=[S1]           ← work child #2
+├── S3 depends_on=[S2]           ← work child #3
+└── rollup depends_on=[S1,S2,S3] ← summary child; reads the others' reports
+```
+
+Why: a parent that "summarizes children" creates a temporal coupling
+the queue can't help with — workers can claim it but can't do its work
+until the children finish. The rollup-as-final-child pattern is what
+the dep gate is for; it lets the queue order things naturally.
+
+The runtime gate matches this convention: parents are claimable as
+soon as their deps are done (don't wait for children); they cannot
+**finish** until every child is in {done, rejected, superseded}
+(`pm finished` exit 14 otherwise). See
+`system-models/planning_parent_gate.als#ParentNotFinishedWhilePendingChild`.
+
 ### Enqueueing many tasks at once — prefer `pm bulk-plan`
 
 When you are about to enqueue more than ~3 tasks in a row (e.g. one

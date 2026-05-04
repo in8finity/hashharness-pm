@@ -1047,34 +1047,30 @@ def g32_reclaim_refuses_non_working_root() -> None:
               f"G32 RC6: reclaim of `done` must exit 6; got {p.returncode}")
 
 
-def g33_parent_gated_by_pending_children() -> None:
-    """G33: `pm next` skips a parent task whose children aren't all in
-    a terminal status (done / rejected / superseded). Models the
-    parent-rolls-up-children gate verified by
-    system-models/planning_parent_gate.als#ParentBlockedByPendingChild.
+def g33_parent_runnable_with_pending_children() -> None:
+    """G33: `pm next` returns a parent task even while its children are
+    pending. The queue convention is that parents are grouping/contexting
+    nodes — they hold the lifecycle lease over the subtree but do no
+    work in their own body, so the orchestrator should be able to claim
+    them first to bind the lifecycle/context. The rollup-after-children
+    invariant lives at finish-time (see G56). Verified by
+    planning_parent_gate.als#ParentRunnableEvenWithPendingChildren.
     """
     q = fresh_queue("g33")
     par = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "parent",
                         env_extra={"PM_WORKDIR": ""})
                      .stdout)["task"]["text_sha256"]
-    # Spawn two children with parent kept in `new`. plan.py only needs
-    # the parent to have *any* latest_status (the genesis new is fine).
     json.loads(pm("plan", "--queue", q, "--title", "K1", "--text", "k1",
                   "--parent", par, env_extra={"PM_WORKDIR": ""}).stdout)
     json.loads(pm("plan", "--queue", q, "--title", "K2", "--text", "k2",
                   "--parent", par, env_extra={"PM_WORKDIR": ""}).stdout)
 
-    assert_eq(store.status_value(store.latest_status(par)), "new",
-              "G33 parent stays `new` (never claimed)")
-
-    # pm next must return one of the kids, NOT the parent — even though
-    # parent is older (created first) and would otherwise win the order.
+    # Parent created first → comes first in the FIFO runnable order.
     nxt = json.loads(pm("next", "--queue", q,
                         env_extra={"PM_WORKDIR": ""}).stdout)
-    assert nxt is not None, "G33 expected a runnable kid, got null"
-    nxt_slug = (nxt.get("attributes") or {}).get("slug")
-    assert nxt_slug in ("k1", "k2"), \
-        f"G33 expected k1 or k2 (a child), got slug={nxt_slug!r}"
+    assert nxt is not None, "G33 expected a runnable task, got null"
+    assert_eq(nxt["text_sha256"], par,
+              "G33 pm next must return the parent first (FIFO; pending children no longer block)")
 
 
 def g34_parent_unblocks_after_children_settle() -> None:
@@ -1159,12 +1155,22 @@ def g36_bulk_plan_chain_siblings() -> None:
     assert_eq((k3.get("links") or {}).get("dependsOn"), [k2_record],
               "G36 k3 should depend on k2's record_sha256")
 
-    # pm next must return k1 first — composes with parent-gate from G33.
+    # pm next must return par first (oldest, no deps; under the unified
+    # parent-rolls-up rule, parents are claimable before children — see
+    # G33). Then k1 (first sibling, no auto-dep). k2 and k3 are blocked
+    # by their auto-injected deps.
     nxt = json.loads(pm("next", "--queue", q,
                         env_extra={"PM_WORKDIR": ""}).stdout)
     nxt_slug = (nxt.get("attributes") or {}).get("slug")
-    assert_eq(nxt_slug, "k1",
-              f"G36 expected k1 first under chained-sibling order; got {nxt_slug!r}")
+    assert_eq(nxt_slug, "par",
+              f"G36 expected par first (FIFO; parents claim early); got {nxt_slug!r}")
+    # Sanity-claim par, then k1 should be next (k2/k3 are dep-blocked).
+    par_sha = store.find_task_by_slug(q, "par")["text_sha256"]
+    pm("executing", "--task", par_sha)
+    nxt2 = json.loads(pm("next", "--queue", q,
+                         env_extra={"PM_WORKDIR": ""}).stdout)
+    assert_eq((nxt2.get("attributes") or {}).get("slug"), "k1",
+              "G36 expected k1 second (only sibling without auto-dep)")
 
 
 def g37_replan_cascade_down() -> None:
@@ -1435,12 +1441,14 @@ def g45_self_parent_refused() -> None:
               f"G45 expected exit 11 on self-parent; got {p.returncode}")
 
 
-def g44_superseded_child_is_terminal_for_parent_gate() -> None:
-    """G44: parent-gate treats a `superseded` child as terminal — the
-    parent becomes runnable even when its only child was replanned with
-    body adjustment (which marks the original superseded). Closes the
-    coverage gap on
-    planning_parent_gate.als#SupersededChildIsTerminalForGate.
+def g44_superseded_child_is_terminal_for_finish_gate() -> None:
+    """G44: the finish-time parent gate treats a `superseded` child as
+    terminal. Tree: par with one kid; kid driven to done; replanned
+    with --text creates a kid-r1 clone (kid → superseded). Once the
+    clone is also done, par.finished succeeds — superseded counts as
+    settled. Verified by
+    planning_parent_gate.als#ParentNotFinishedWhilePendingChild +
+    store.TERMINAL_FOR_PARENT.
     """
     q = fresh_queue("g44")
     par = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "parent",
@@ -1452,19 +1460,17 @@ def g44_superseded_child_is_terminal_for_parent_gate() -> None:
     pm("executing", "--task", kid)
     pm("report", "--task", kid, "--title", "ok", "--text", "ok")
     pm("finished", "--task", kid)
-    # Replan with adjusted body → kid becomes `superseded`, a kid-rN clone
-    # is created (with the same parent, so par now has two children).
     pm("replan", "--task", kid, "--no-cascade", "--text", "v2")
     assert_eq(store.status_value(store.latest_status(kid)), "superseded",
               "G44 sanity: original kid is superseded after replan-with-text")
 
-    # The clone (kid-r1) is `new` — par should NOT be runnable yet,
-    # because the clone is a non-terminal child.
-    nxt = json.loads(pm("next", "--queue", q,
-                        env_extra={"PM_WORKDIR": ""}).stdout)
-    nxt_slug = (nxt.get("attributes") or {}).get("slug") if nxt else None
-    assert nxt_slug != "p", \
-        f"G44 par must NOT be runnable while kid-r1 is `new`; got {nxt_slug!r}"
+    # Claim par + report (so finish has a TaskReport). With the clone
+    # still `new`, finish must refuse with exit 14.
+    pm("executing", "--task", par)
+    pm("report", "--task", par, "--title", "rollup", "--text", "x")
+    p = pm("finished", "--task", par, check=False)
+    assert_eq(p.returncode, 14,
+              f"G44 par.finish must refuse while clone pending; got {p.returncode}")
 
     # Drive the clone to done.
     clone = store.find_task_by_slug(q, "k-r1")
@@ -1473,12 +1479,10 @@ def g44_superseded_child_is_terminal_for_parent_gate() -> None:
     pm("report", "--task", clone_sha, "--title", "ok", "--text", "ok")
     pm("finished", "--task", clone_sha)
 
-    # Now both children are terminal (one superseded, one done) — par
-    # must be the next runnable task.
-    nxt2 = json.loads(pm("next", "--queue", q,
-                         env_extra={"PM_WORKDIR": ""}).stdout)
-    assert nxt2 is not None and nxt2["text_sha256"] == par, \
-        "G44 par must be runnable once {superseded kid + done clone} both terminal"
+    # Now both children settled (one superseded, one done) — par.finish ok.
+    pm("finished", "--task", par)
+    assert_eq(store.status_value(store.latest_status(par)), "done",
+              "G44 par must close once {superseded kid + done clone} both terminal")
 
 
 def g41_cascade_down_parents_two_level_chain() -> None:
@@ -1674,6 +1678,57 @@ def g52_replan_cascade_directions_dual() -> None:
               "G52 dir2: A reset by cascade-up on B")
 
 
+def g56_parent_finish_blocked_while_children_pending() -> None:
+    """G56: `pm finished` on a parent task whose children aren't settled
+    refuses with exit 14. The rollup invariant lives at finish-time
+    now (next-time exempts sticky parents to enable early claim).
+    Applies to sticky and non-sticky parents equally. Verified by
+    planning_parent_gate.als#ParentNotFinishedWhilePendingChild."""
+    q = fresh_queue("g56")
+    par = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "sticky",
+                        "--sticky",
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    json.loads(pm("plan", "--queue", q, "--title", "C", "--text", "kid",
+                  "--parent", par,
+                  env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    ctx = pm("context-id").stdout.strip()
+    env = {"PM_CONTEXT_ID": ctx, "PM_WORKDIR": ""}
+    pm("executing", "--task", par, env_extra=env)
+    pm("report", "--task", par, "--title", "rollup-draft", "--text", "x",
+       env_extra=env)
+    p = pm("finished", "--task", par, env_extra=env, check=False)
+    assert_eq(p.returncode, 14,
+              f"G56 finished on parent with pending child must exit 14; "
+              f"got {p.returncode}\nstderr: {p.stderr}")
+    # Parent stays in `working`, not transitioned.
+    assert_eq(store.status_value(store.latest_status(par)), "working",
+              "G56 parent must stay in working after refused finish")
+
+
+def g57_parent_finish_succeeds_after_children_settle() -> None:
+    """G57: once every child is in {done, rejected, superseded}, `pm
+    finished` on the parent succeeds. Pairs with G56 (the refusal)."""
+    q = fresh_queue("g57")
+    par = json.loads(pm("plan", "--queue", q, "--title", "P", "--text", "sticky",
+                        "--sticky",
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    kid = json.loads(pm("plan", "--queue", q, "--title", "C", "--text", "kid",
+                        "--parent", par,
+                        env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    ctx = pm("context-id").stdout.strip()
+    env = {"PM_CONTEXT_ID": ctx, "PM_WORKDIR": ""}
+    pm("executing", "--task", par, env_extra=env)
+    pm("executing", "--task", kid, env_extra=env)
+    pm("report", "--task", kid, "--title", "k", "--text", "kid done",
+       env_extra=env)
+    pm("finished", "--task", kid, env_extra=env)
+    pm("report", "--task", par, "--title", "rollup", "--text", "all done",
+       env_extra=env)
+    pm("finished", "--task", par, env_extra=env)
+    assert_eq(store.status_value(store.latest_status(par)), "done",
+              "G57 parent must close to done after kid settles")
+
+
 def g54_parent_chain_cycle_refused() -> None:
     """G54: NoCycle on parentTask. bulk_plan with a spec whose `parent`
     chain transitively contains the spec's own deterministic sha (slug)
@@ -1768,7 +1823,7 @@ ALL_FLOWS = {
     "G30": g30_reclaim_cascade_three_deep_transitive,
     "G31": g31_reclaim_cascade_isolates_sibling,
     "G32": g32_reclaim_refuses_non_working_root,
-    "G33": g33_parent_gated_by_pending_children,
+    "G33": g33_parent_runnable_with_pending_children,
     "G34": g34_parent_unblocks_after_children_settle,
     "G35": g35_childless_task_still_runnable,
     "G36": g36_bulk_plan_chain_siblings,
@@ -1779,7 +1834,7 @@ ALL_FLOWS = {
     "G41": g41_cascade_down_parents_two_level_chain,
     "G42": g42_cascade_down_parents_no_parent_safe,
     "G43": g43_cascade_down_parents_skips_inflight_parent,
-    "G44": g44_superseded_child_is_terminal_for_parent_gate,
+    "G44": g44_superseded_child_is_terminal_for_finish_gate,
     "G45": g45_self_parent_refused,
     "G46s": g46_sticky_rebinding_after_reclaim,
     "G47": g47_finished_enforces_full_sticky_chain,
@@ -1790,6 +1845,8 @@ ALL_FLOWS = {
     "G52": g52_replan_cascade_directions_dual,
     "G53": g53_cross_queue_isolation,
     "G54": g54_parent_chain_cycle_refused,
+    "G56": g56_parent_finish_blocked_while_children_pending,
+    "G57": g57_parent_finish_succeeds_after_children_settle,
 }
 
 

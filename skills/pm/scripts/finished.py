@@ -29,6 +29,7 @@ Exit codes:
   9  verifier failed (--rejected bypasses this; --skip-verifier overrides)
   10 sticky-context refusal: task is bound to a different PM_CONTEXT_ID
   13 --skip-verifier without --note "<reason>" of >= 10 chars
+  14 parent-rolls-up gate: this task has children not yet settled
 """
 from __future__ import annotations
 
@@ -445,6 +446,20 @@ def main() -> int:
 
     task = store.get_task(args.task) or {}
     task_attrs = task.get("attributes") or {}
+
+    # Parent-rolls-up-children gate at finish-time. This is where the
+    # rollup invariant lives now (next.py exempts sticky parents from
+    # the same gate so they can be claimed first to bind the chain).
+    # Refuse closing any parent — sticky or not — while any child is
+    # still pending. See system-models/planning_parent_gate.als.
+    queue = task_attrs.get("queue", "default")
+    if not store.children_settled(args.task, queue):
+        sys.stderr.write(
+            f"refusing: task {args.task[:12]} has children not yet in "
+            f"{{done, rejected, superseded}} — close children first\n"
+        )
+        return 14
+
     verifier = (task_attrs.get("verifier") or "").strip()
 
     extra_attrs: dict[str, Any] = {}

@@ -595,6 +595,33 @@ def cancel_task(
     return {"report": report, "status": status}
 
 
+# Statuses that count as "settled" for a child — a parent doesn't need
+# to wait on them. `superseded` and `rejected` are terminal in the sense
+# that they will never produce more work, so a parent gated on them
+# would otherwise block forever. Single source of truth for next.py,
+# pull.py, and finished.py.
+TERMINAL_FOR_PARENT: frozenset[str] = frozenset({"done", "rejected", "superseded"})
+
+
+def children_settled(parent_sha: str, queue: str) -> bool:
+    """True iff every child of ``parent_sha`` (via parentTask reverse-link)
+    has a latest TaskStatus in ``TERMINAL_FOR_PARENT``. Used by the
+    parent-rolls-up-children gate at next/pull-time (non-sticky parents)
+    and at finish-time (all parents). See system-models/
+    planning_parent_gate.als."""
+    parent = get_task(parent_sha)
+    if parent is None:
+        return True
+    parent_record_sha = parent["record_sha256"]
+    for t in list_tasks(queue):
+        if (t.get("links") or {}).get("parentTask") != parent_record_sha:
+            continue
+        cur = status_value(latest_status(t["text_sha256"]))
+        if cur not in TERMINAL_FOR_PARENT:
+            return False
+    return True
+
+
 def find_undone_subtasks(parent_sha: str, queue: str) -> list[dict[str, Any]]:
     """Return Tasks whose ``links.parentTask`` points at ``parent_sha`` and
     whose latest status is not in {done, rejected}. Used by cancel.py

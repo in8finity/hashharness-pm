@@ -50,24 +50,6 @@ def main() -> int:
     # status lookups off text_sha256, so build a one-shot translation.
     record_to_text = {t["record_sha256"]: t["text_sha256"] for t in tasks}
 
-    # Reverse parent → children index, by parent's text_sha256. Built once
-    # per pm-next call so the per-task gating loop stays O(1) per task.
-    children_of: dict[str, list[str]] = {}
-    for t in tasks:
-        parent_record = (t.get("links") or {}).get("parentTask")
-        if not parent_record:
-            continue
-        parent_text = record_to_text.get(parent_record)
-        if parent_text is None:
-            continue  # cross-queue parent — treat as no link for gating
-        children_of.setdefault(parent_text, []).append(t["text_sha256"])
-
-    # Statuses that count as "settled" for a child — parent doesn't need
-    # to wait on them. `superseded` and `rejected` are terminal in the
-    # sense that they will never produce more work, so a parent gated on
-    # them would otherwise block forever.
-    TERMINAL_FOR_PARENT = {"done", "rejected", "superseded"}
-
     status_cache: dict[str, str | None] = {}
 
     def status_of(sha: str) -> str | None:
@@ -82,12 +64,6 @@ def main() -> int:
             return False
         return status_of(d_text) == "done"
 
-    def children_settled(parent_sha: str) -> bool:
-        for child_sha in children_of.get(parent_sha, ()):
-            if status_of(child_sha) not in TERMINAL_FOR_PARENT:
-                return False
-        return True
-
     workdir_skipped = 0
     for t in tasks:
         sha = t["text_sha256"]
@@ -100,8 +76,15 @@ def main() -> int:
         deps = (t.get("links") or {}).get("dependsOn") or []
         if not all(dep_done(d) for d in deps):
             continue
-        if not children_settled(sha):
-            continue
+        # Parent-rolls-up gate moved to finish-time. A parent is now
+        # claimable as soon as its deps are done — the queue convention
+        # is that parents are grouping/contexting nodes, not work nodes,
+        # so claiming them early just holds the lifecycle lease. The
+        # rollup-summary work belongs in a final child task that depends
+        # on every sibling. finished.py refuses to close a parent while
+        # any child is still pending (exit 14). See
+        # skills/pm/plan/SKILL.md "Parents are grouping nodes" and
+        # planning_parent_gate.als#ParentNotFinishedWhilePendingChild.
         print(json.dumps(t, indent=2))
         return 0
 

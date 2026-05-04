@@ -52,20 +52,43 @@ fun children[p: Task] : set Task { parent.p }
 // (Done — successful; Rejected/Superseded — terminal failure or replacement.)
 fun terminalForParent : set Status { SDone + SRejected + SSuperseded }
 
-// A task is runnable iff status=New AND every child is settled.
-// (depends_on omitted — composed orthogonally at the code level.)
+// A task is runnable iff status=New AND its deps are settled.
+// PARENTS ARE NOT BLOCKED BY PENDING CHILDREN at runnable-time. The
+// queue convention is that parents are grouping/contexting nodes —
+// they hold the lifecycle lease over the subtree but do no work in
+// their own body. Rollup-summary work belongs in a final child task
+// that depends on every sibling. The rollup-after-children invariant
+// lives at finish-time (`finishable[]` below).
+// depends_on omitted — composed orthogonally at the code level.
 pred runnable[t: Task] {
   t.status = SNew
+}
+
+// A task is finishable iff it's currently working AND every child is
+// settled. THIS is where the rollup invariant lives. Applies to all
+// parents — sticky and non-sticky alike — because the convention says
+// the parent's job is "hold the lifecycle, close after children."
+pred finishable[t: Task] {
+  t.status = SWorking
   all c: children[t] | c.status in terminalForParent
 }
 
-// ---- safety: pending children block the parent ----
-assert ParentBlockedByPendingChild {
+// ---- safety: any parent with pending children cannot finish ----
+assert ParentNotFinishedWhilePendingChild {
   all t: Task |
     (some c: children[t] | c.status in (SNew + SWorking))
-      => not runnable[t]
+      => not finishable[t]
 }
-check ParentBlockedByPendingChild for 6
+check ParentNotFinishedWhilePendingChild for 6
+
+// ---- liveness: a parent with pending children IS still runnable —
+// the orchestrator can pick it up to bind the lifecycle / context now,
+// and only the close is gated. ----
+assert ParentRunnableEvenWithPendingChildren {
+  all t: Task |
+    t.status = SNew => runnable[t]
+}
+check ParentRunnableEvenWithPendingChildren for 6
 
 // ---- liveness: settled children unblock the parent ----
 assert ParentRunnableAfterChildrenSettle {
@@ -111,13 +134,25 @@ check SupersededChildIsTerminalForGate for 6
 
 // ---- concrete scenarios ----
 
-// Find a parent + 2 children where one child is Working — parent must NOT
-// be runnable. The model should return an instance.
-run BlockedByWorkingChild {
+// Witness: a parent with a Working child IS still runnable — the
+// orchestrator can pick it up early to bind the lifecycle / context,
+// the rollup invariant only applies at finish-time.
+run RunnableEvenWithPendingChild {
   some p: Task |
     p.status = SNew
     and #children[p] = 2
     and (some c: children[p] | c.status = SWorking)
+    and runnable[p]
+} for 4
+
+// Witness: a parent in `working` cannot finish while a child is
+// pending — the rollup invariant holds at finish-time.
+run ParentBlockedAtFinish {
+  some p: Task |
+    p.status = SWorking
+    and #children[p] = 1
+    and (some c: children[p] | c.status = SWorking)
+    and not finishable[p]
 } for 4
 
 // Find a sticky-style nested expansion (parent + 2 children, all Done) and
