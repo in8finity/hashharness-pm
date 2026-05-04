@@ -279,15 +279,30 @@ def collect_required_contexts(task_sha: str) -> set[str]:
     contexts: set[str] = set()
     seen: set[str] = set()
 
-    def visit_up(t_sha: str) -> None:
-        if t_sha in seen:
+    me = get_task(task_sha)
+    if me is None:
+        return contexts
+    queue = (me.get("attributes") or {}).get("queue", "default")
+    # Link values (parentTask, dependsOn) are record_sha256; Task lookups
+    # key off text_sha256. Build a one-shot translation map from the queue
+    # so visit_up can hop record→text→record without re-querying.
+    queue_tasks = list_tasks(queue)
+    record_to_text = {t["record_sha256"]: t["text_sha256"] for t in queue_tasks}
+    text_to_task = {t["text_sha256"]: t for t in queue_tasks}
+
+    def visit_up(record_sha: str) -> None:
+        if record_sha in seen:
             return
-        seen.add(t_sha)
-        t = get_task(t_sha)
+        seen.add(record_sha)
+        text_sha = record_to_text.get(record_sha)
+        if text_sha is None:
+            # Cross-queue ancestor (rare but supported elsewhere) — skip.
+            return
+        t = text_to_task.get(text_sha)
         if t is None:
             return
         if task_is_sticky(t):
-            cid = task_context_id(t_sha)
+            cid = task_context_id(text_sha)
             if cid:
                 contexts.add(cid)
         parent = (t.get("links") or {}).get("parentTask")
@@ -296,10 +311,6 @@ def collect_required_contexts(task_sha: str) -> set[str]:
         for d in (t.get("links") or {}).get("dependsOn") or []:
             visit_up(d)
 
-    me = get_task(task_sha)
-    if me is None:
-        return contexts
-    queue = (me.get("attributes") or {}).get("queue", "default")
     parent = (me.get("links") or {}).get("parentTask")
     if parent:
         visit_up(parent)

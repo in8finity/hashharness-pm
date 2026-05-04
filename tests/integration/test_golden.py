@@ -1583,6 +1583,121 @@ def g38_replan_cascade_down_skips_inflight() -> None:
     assert_eq(descs[0].get("current"), "new", "G38 skipped descendant current=new")
 
 
+def g51_sticky_chain_conflict_refused() -> None:
+    """G51: SR5 — claim a sticky task whose two sticky deps are currently
+    `working` under *different* contexts → exit 10 with
+    `StickyContextConflict`. The conflict is detected at the executing
+    gate (collect_required_contexts walks dependsOn and finds two
+    distinct bindings on the latest TaskStatus of each dep). Verified by
+    planning_sticky_rebinding.als#SR5.
+
+    Note on scope: the conflict surface lives on `working` deps —
+    `finished.py` does not currently propagate `context_id` to the done
+    status, so once a dep finishes its context is no longer visible to
+    the walk. This test exercises the conflict path; the
+    "done-ancestor still propagates context" subtlety from the .als
+    comment is documented but not enforced today.
+    """
+    q = fresh_queue("g51")
+    d1 = json.loads(pm("plan", "--queue", q, "--title", "D1", "--text", "x",
+                       "--sticky",
+                       env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    d2 = json.loads(pm("plan", "--queue", q, "--title", "D2", "--text", "y",
+                       "--sticky",
+                       env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    t = json.loads(pm("plan", "--queue", q, "--title", "T", "--text", "t",
+                      "--sticky", "--depends-on", f"{d1},{d2}",
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+
+    ctx1 = pm("context-id").stdout.strip()
+    ctx2 = pm("context-id").stdout.strip()
+    assert ctx1 != ctx2, "G51 generated context IDs should differ"
+
+    # Claim D1 under ctx1, D2 under ctx2 — both stay `working`.
+    pm("executing", "--task", d1,
+       env_extra={"PM_CONTEXT_ID": ctx1, "PM_WORKDIR": ""})
+    pm("executing", "--task", d2,
+       env_extra={"PM_CONTEXT_ID": ctx2, "PM_WORKDIR": ""})
+
+    # Claim T with EITHER context — must refuse on conflict, not on mismatch.
+    p = pm("executing", "--task", t,
+           env_extra={"PM_CONTEXT_ID": ctx1, "PM_WORKDIR": ""},
+           check=False)
+    assert_eq(p.returncode, 10,
+              f"G51 claim under conflict must exit 10; got {p.returncode}\nstderr: {p.stderr}")
+    assert "conflict" in (p.stderr or "").lower() or "distinct context" in (p.stderr or "").lower(), \
+        f"G51 stderr should mention the conflict shape; got: {p.stderr!r}"
+    # And again with the OTHER context — same refusal (no winning side).
+    p = pm("executing", "--task", t,
+           env_extra={"PM_CONTEXT_ID": ctx2, "PM_WORKDIR": ""},
+           check=False)
+    assert_eq(p.returncode, 10,
+              f"G51 claim under conflict (other ctx) must exit 10; got {p.returncode}")
+
+
+def g52_replan_cascade_directions_dual() -> None:
+    """G52: R11 — for a terminal a→b edge (b depends on a), `replan a
+    --cascade-down` resets b AND `replan b --cascade-up` resets a.
+    Bidirectional duality on the same edge shape, in one test (G37 +
+    G7b cover the directions separately). Verified by
+    planning_replan.als#R11.
+    """
+    q = fresh_queue("g52")
+    a = json.loads(pm("plan", "--queue", q, "--title", "A", "--text", "x",
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    b = json.loads(pm("plan", "--queue", q, "--title", "B", "--text", "y",
+                      "--depends-on", a,
+                      env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    for sha in (a, b):
+        pm("executing", "--task", sha)
+        pm("report", "--task", sha, "--title", "ok", "--text", "ok")
+        pm("finished", "--task", sha)
+
+    # Direction 1: cascade-down from A resets B.
+    pm("replan", "--task", a, "--no-cascade", "--cascade-down")
+    assert_eq(store.status_value(store.latest_status(a)), "new",
+              "G52 dir1: A reset")
+    assert_eq(store.status_value(store.latest_status(b)), "new",
+              "G52 dir1: B reset by cascade-down on A")
+
+    # Re-finish both to set up the inverse direction.
+    for sha in (a, b):
+        pm("executing", "--task", sha)
+        pm("report", "--task", sha, "--title", "ok", "--text", "ok")
+        pm("finished", "--task", sha)
+
+    # Direction 2: cascade-up from B resets A.
+    pm("replan", "--task", b, "--cascade-up")
+    assert_eq(store.status_value(store.latest_status(b)), "new",
+              "G52 dir2: B reset")
+    assert_eq(store.status_value(store.latest_status(a)), "new",
+              "G52 dir2: A reset by cascade-up on B")
+
+
+def g53_cross_queue_isolation() -> None:
+    """G53: Q2 — `pm next --queue Q1` never returns a Q2 task and vice
+    versa. Cross-queue isolation is structural in store.list_tasks (the
+    query is keyed on queue) but no test currently mixes queues
+    explicitly. Verified by planning_isolation.als#Q2.
+    """
+    q1 = fresh_queue("g53a")
+    q2 = fresh_queue("g53b")
+    t1 = json.loads(pm("plan", "--queue", q1, "--title", "T1", "--text", "in q1",
+                       env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    t2 = json.loads(pm("plan", "--queue", q2, "--title", "T2", "--text", "in q2",
+                       env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+
+    nxt1 = pm("next", "--queue", q1, env_extra={"PM_WORKDIR": ""}).stdout.strip()
+    nxt2 = pm("next", "--queue", q2, env_extra={"PM_WORKDIR": ""}).stdout.strip()
+    assert nxt1 != "null", "G53 q1 should have a runnable task"
+    assert nxt2 != "null", "G53 q2 should have a runnable task"
+    sha1 = json.loads(nxt1)["text_sha256"]
+    sha2 = json.loads(nxt2)["text_sha256"]
+    assert_eq(sha1, t1, "G53 pm next --queue q1 must return T1, not T2")
+    assert_eq(sha2, t2, "G53 pm next --queue q2 must return T2, not T1")
+    assert sha1 != sha2, "G53 cross-queue tasks must be distinct"
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -1639,6 +1754,9 @@ ALL_FLOWS = {
     "G48": g48_heartbeat_enforces_sticky_chain,
     "G49": g49_default_replan_no_cascades,
     "G50": g50_skip_verifier_requires_note,
+    "G51": g51_sticky_chain_conflict_refused,
+    "G52": g52_replan_cascade_directions_dual,
+    "G53": g53_cross_queue_isolation,
 }
 
 
