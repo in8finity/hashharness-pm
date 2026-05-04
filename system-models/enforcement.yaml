@@ -1,0 +1,578 @@
+# Enforcement map — one entry per verified property (or tightly-grouped
+# property cluster). Each entry asserts that the property is enforced by
+# named code gates, documented in skill prose, and exercised by golden
+# tests. The checker (`check_enforcement.py`) AST-parses the code +
+# greps the prose/tests; an entry passes only when EVERY cited gate is
+# still present.
+#
+# Per-entry shape:
+#   id            — short slug, kebab-case
+#   description   — one-line semantic intent
+#   models        — list of {file, asserts: [name, ...]}
+#   code_gates    — list of {file, must_call?, must_match?, must_exit?}
+#                     where each gate carries any subset of:
+#                       must_call:  AST-checked function-name reference
+#                       must_match: regex search on file contents
+#                       must_exit:  literal `return N` / `sys.exit(N)`
+#                     A gate passes when ALL its present checks pass.
+#   skill_texts   — list of {file, must_mention: [phrase, ...]}
+#   tests         — list of golden test names (G##); each must be defined
+#                     in tests/integration/test_golden.py
+#
+# Run `python3 system-models/check_enforcement.py` (from repo root) to
+# verify every entry. Exit 0 → all green. Exit non-zero → see report.
+
+# =====================================================================
+# planning.als — core protocol
+# =====================================================================
+
+- id: terminal_absorbing
+  description: done/rejected/superseded never transition out (absorbing).
+  models:
+    - file: system-models/planning.als
+      asserts: [TerminalAbsorbing]
+  code_gates:
+    - file: skills/pm/scripts/cancel.py
+      must_match: 'return\s+6'
+    - file: skills/pm/scripts/finished.py
+      must_match: 'cur(rent)?\s*[!=]'      # status guard before transition
+  skill_texts:
+    - file: skills/pm/scripts/cancel.py
+      must_mention: ["absorbing", "terminal"]
+    - file: skills/pm/scripts/finished.py
+      must_mention: ["done", "rejected"]
+  tests: [G17, G23, G32]
+
+- id: proof_required_for_terminal
+  description: every terminal task has a TaskReport linked as proof.
+  models:
+    - file: system-models/planning.als
+      asserts: [ProofRequiredForTerminal]
+  code_gates:
+    - file: skills/pm/scripts/finished.py
+      must_match: 'no TaskReport'
+      must_exit: 7
+  skill_texts:
+    - file: skills/pm/scripts/finished.py
+      must_mention: ["TaskReport", "report"]
+  tests: [G16, G1]
+
+- id: single_owner_and_race_safety
+  description: at most one owner per task; race-losing claims rejected via chain_predecessor.
+  models:
+    - file: system-models/planning.als
+      asserts: [SingleOwner, NoDoubleCommit, OwnerStableThroughWorkingPhase]
+  code_gates:
+    - file: skills/pm/scripts/executing.py
+      must_call: append_claim
+      must_match: 'ClaimLost'
+      must_exit: 8
+    - file: skills/pm/scripts/store.py
+      must_match: 'class ClaimLost|chain_predecessor'
+  skill_texts:
+    - file: skills/pm/scripts/executing.py
+      must_mention: ["claim race", "8"]
+    - file: skills/pm/scripts/store.py
+      must_mention: ["chain_predecessor", "prevStatus"]
+  tests: [G6]
+
+- id: dependencies_done_at_claim
+  description: every dep is `done` at the moment a task is claimed.
+  models:
+    - file: system-models/planning.als
+      asserts: [DependenciesDoneAtClaim]
+  code_gates:
+    - file: skills/pm/scripts/next.py
+      must_call: dep_done
+    - file: skills/pm/scripts/pull.py
+      must_call: dep_done
+  skill_texts:
+    - file: skills/pm/scripts/next.py
+      must_mention: ["dependsOn", "done"]
+  tests: [G2, G14]
+
+- id: verifier_gate_on_done
+  description: tasks with `verifier` attr cannot finish as done unless verifier passed.
+  models:
+    - file: system-models/planning.als
+      asserts: [VerifierGateOnDone, VerifyRequiresWorkingReport]
+  code_gates:
+    - file: skills/pm/scripts/finished.py
+      must_call: run_verifier
+      must_exit: 9
+  skill_texts:
+    - file: skills/pm/scripts/finished.py
+      must_mention: ["verifier", "9"]
+  tests: [G3, G3b, G10]
+
+- id: sticky_chain_coherence
+  description: Sticky-bound tasks reject operations from outside the bound context across the whole sticky chain.
+  models:
+    - file: system-models/planning.als
+      asserts: [StickyChainCoherence, StickyBindingOnlyAtClaim]
+    - file: system-models/planning_sticky_rebinding.als
+      asserts: [SR1_ReclaimClearsBinding, SR2_ClaimRespectsAncestorChain, SR3_BindingStableWhileWorking, SR4_RebindPreservesChainCoherence, SR5_NoClaimUnderConflict]
+  code_gates:
+    - {file: skills/pm/scripts/executing.py,  must_call: check_sticky_eligibility, must_exit: 10}
+    - {file: skills/pm/scripts/report.py,     must_call: check_sticky_eligibility, must_exit: 10}
+    - {file: skills/pm/scripts/finished.py,   must_call: check_sticky_eligibility, must_exit: 10}
+    - {file: skills/pm/scripts/heartbeat.py,  must_call: check_sticky_eligibility, must_exit: 10}
+  skill_texts:
+    - file: skills/pm/executing/SKILL.md
+      must_mention: ["sticky", "exit 10"]
+    - file: skills/pm/scripts/heartbeat.py
+      must_mention: ["sticky", "(exit 10)"]         # exit-code table line
+  tests: [G8, G46s, G47, G48]
+
+- id: cancel_lifecycle
+  description: cancel only fires on non-terminal; cancelled is rejected-terminal; cancel synthesizes proof.
+  models:
+    - file: system-models/planning.als
+      asserts: [CancelledIsRejectedTerminal, CancelOnlyOnNonTerminal, CancelledHasProof]
+  code_gates:
+    - file: skills/pm/scripts/cancel.py
+      must_call: cancel_one
+      must_exit: 6
+    - file: skills/pm/scripts/cancel.py
+      must_call: cancel_task            # invokes store.cancel_task to synthesize report+rejected
+    - file: skills/pm/scripts/store.py
+      must_match: 'def cancel_task|append_report'
+  skill_texts:
+    - file: skills/pm/scripts/cancel.py
+      must_mention: ["non-terminal", "synthetic"]
+  tests: [G11, G17, G27]
+
+# =====================================================================
+# planning_lease.als — ownership liveness (lease + crash + reclaim)
+# =====================================================================
+
+- id: lease_live_worker_actions
+  description: only an alive (or rebinding) agent can claim/report/finish; zombie heartbeats refused.
+  models:
+    - file: system-models/planning_lease.als
+      asserts: [LiveWorkerActions]
+  code_gates:
+    - file: skills/pm/scripts/heartbeat.py
+      must_match: 'lease lost|zombie heartbeat'
+      must_exit: 12
+  skill_texts:
+    - file: skills/pm/scripts/heartbeat.py
+      must_mention: ["lease", "12"]
+  tests: [G22]
+
+- id: lease_no_zombie_after_reclaim
+  description: after reclaim a task is genuinely PNew with no owner; reports survive.
+  models:
+    - file: system-models/planning_lease.als
+      asserts: [NoZombieAfterReclaim]
+  code_gates:
+    - file: skills/pm/scripts/sweep.py
+      must_call: reclaim
+    - file: skills/pm/scripts/reclaim.py
+      must_call: reclaim
+    - file: skills/pm/scripts/store.py
+      must_match: 'def reclaim|reclaimed.*True'
+  skill_texts:
+    - file: skills/pm/scripts/sweep.py
+      must_mention: ["zombie", "reclaim"]
+  tests: [G12, G13]
+
+- id: lease_heartbeat_vs_reclaim_race
+  description: live heartbeat after observation blocks reclaim; preempt_heartbeat via chain_predecessor on prevHeartbeat.
+  models:
+    - file: system-models/planning_lease.als
+      asserts: [ReclaimRequiresStableHeartbeatChain, LiveHeartbeatBlocksReclaim]
+  code_gates:
+    - file: skills/pm/scripts/sweep.py
+      must_call: latest_heartbeat
+      must_match: 'preempt_heartbeat'
+    - file: skills/pm/scripts/store.py
+      must_match: 'WorkerStillAlive|prevHeartbeat'
+  skill_texts:
+    - file: skills/pm/scripts/sweep.py
+      must_mention: ["heartbeat", "race"]
+  tests: [G20, G21]
+
+# =====================================================================
+# planning_plan_race.als — slug uniqueness
+# =====================================================================
+
+- id: unique_slug_in_queue
+  description: at every moment, no two pending tasks share a slug (content-addressed via task:queue/slug).
+  models:
+    - file: system-models/planning_plan_race.als
+      asserts: [UniqueSlugInQueue]
+  code_gates:
+    - file: skills/pm/scripts/store.py
+      must_call: task_identity_text
+      must_match: 'class SlugTaken'
+    - file: skills/pm/scripts/plan.py
+      must_match: 'SlugTaken'
+      must_exit: 4
+  skill_texts:
+    - file: skills/pm/scripts/store.py
+      must_mention: ["slug", "text_sha256"]
+    - file: skills/pm/scripts/plan.py
+      must_mention: ["slug", "concurrently"]
+  tests: [G9]
+
+# =====================================================================
+# planning_replan.als — replan modes (in-place reset, supersede+clone, cascade)
+# =====================================================================
+
+- id: replan_refused_on_superseded
+  description: replan never fires on an already-superseded target.
+  models:
+    - file: system-models/planning_replan.als
+      asserts: [R1_ReplanRefusedOnSuperseded]
+  code_gates:
+    - file: skills/pm/scripts/replan.py
+      must_match: 'superseded.*cannot replan|is superseded'
+      must_exit: 6
+  skill_texts:
+    - file: skills/pm/scripts/replan.py
+      must_mention: ["superseded", "6"]
+  tests: [G24]
+
+- id: replan_reset_lifecycle
+  description: in-place reset only on terminal; sets target to new with replanned=true.
+  models:
+    - file: system-models/planning_replan.als
+      asserts: [R2_ResetOnlyOnTerminal, R3_ResetSetsNew]
+  code_gates:
+    - file: skills/pm/scripts/replan.py
+      must_call: reset_in_place
+      must_match: '"replanned":\s*True'
+  skill_texts:
+    - file: skills/pm/scripts/replan.py
+      must_mention: ["in-place", "replanned"]
+  tests: [G7, G25, G49]
+
+- id: replan_superseded_absorbing
+  description: once superseded, always superseded — no transition out.
+  models:
+    - file: system-models/planning_replan.als
+      asserts: [R4_SupersededIsAbsorbing]
+  code_gates:
+    - file: skills/pm/scripts/cancel.py
+      must_match: 'superseded'
+      must_exit: 6
+  skill_texts:
+    - file: skills/pm/scripts/cancel.py
+      must_mention: ["superseded", "absorbing"]
+  tests: [G23]
+
+- id: replan_clone_semantics
+  description: clone inherits original's deps; clone genesis status carries replan_of pointing at origin.
+  models:
+    - file: system-models/planning_replan.als
+      asserts: [R5_CloneInheritsDeps, R6_CloneCarriesReplanOf]
+  code_gates:
+    - file: skills/pm/scripts/replan.py
+      must_call: supersede_and_clone
+      must_match: '"replan_of":'
+  skill_texts:
+    - file: skills/pm/scripts/replan.py
+      must_mention: ["clone", "replan_of"]
+  tests: [G7, G24]
+
+- id: replan_cascade_up
+  description: cascade-up resets every terminal dep-chain ancestor, skips non-terminal.
+  models:
+    - file: system-models/planning_replan.als
+      asserts: [R7_CascadeUpResetsTerminalAncestors, R8_CascadeUpSkipsNonTerminal]
+  code_gates:
+    - file: skills/pm/scripts/replan.py
+      must_call: find_dependency_ancestors
+      must_match: 'cascade.up|cascade_up'
+  skill_texts:
+    - file: skills/pm/scripts/replan.py
+      must_mention: ["cascade-up", "ancestor"]
+  tests: [G7, G24]
+
+- id: replan_cascade_down
+  description: cascade-down resets every terminal dep-chain descendant, skips non-terminal.
+  models:
+    - file: system-models/planning_replan.als
+      asserts: [R9_CascadeDownResetsTerminalDescendants, R10_CascadeDownSkipsNonTerminal]
+  code_gates:
+    - file: skills/pm/scripts/replan.py
+      must_call: find_dependency_descendants
+      must_match: 'cascade.down|cascade_down'
+  skill_texts:
+    - file: skills/pm/scripts/replan.py
+      must_mention: ["cascade-down", "consumer"]
+  tests: [G37, G38]
+
+- id: replan_cascade_directions_dual
+  description: cascade-down on y resets x AND cascade-up on x resets y, for terminal x→y edge.
+  models:
+    - file: system-models/planning_replan.als
+      asserts: [R11_CascadeDirectionsAreDual]
+  code_gates:
+    - file: skills/pm/scripts/replan.py
+      must_call: find_dependency_ancestors
+    - file: skills/pm/scripts/replan.py
+      must_call: find_dependency_descendants
+  skill_texts:
+    - file: skills/pm/scripts/replan.py
+      must_mention: ["cascade-up", "cascade-down"]
+  tests: [G37, G7]
+
+# =====================================================================
+# planning_cancel_cascade.als — cancel --cascade DFS over parentTask
+# =====================================================================
+
+- id: cancel_cascade_descends
+  description: cancel --cascade reaches every undone descendant via parentTask reverse-links (transitive).
+  models:
+    - file: system-models/planning_cancel_cascade.als
+      asserts: [CC1_NoDescendantLeftUndone, CC4_CascadeIsParentTransitive]
+  code_gates:
+    - file: skills/pm/scripts/cancel.py
+      must_call: cascade
+      must_match: 'parentTask|reverse-link'
+  skill_texts:
+    - file: skills/pm/scripts/cancel.py
+      must_mention: ["cascade", "parentTask"]
+  tests: [G11, G27]
+
+- id: cancel_cascade_skips_absorbing
+  description: cascade leaves already-terminal descendants untouched.
+  models:
+    - file: system-models/planning_cancel_cascade.als
+      asserts: [CC2_PreviousTerminalUntouched, CC3_CascadeOnlyTransitionsNonTerminal]
+  code_gates:
+    - file: skills/pm/scripts/cancel.py
+      must_call: cancel_one
+      must_match: 'absorbing|terminal'
+  skill_texts:
+    - file: skills/pm/scripts/cancel.py
+      must_mention: ["absorbing", "skip"]
+  tests: [G26]
+
+- id: cancel_cascade_scope
+  description: cancel --cascade does not touch non-descendants (siblings outside the parent⁻¹ closure).
+  models:
+    - file: system-models/planning_cancel_cascade.als
+      asserts: [CC5_NonDescendantUntouched]
+  code_gates:
+    - file: skills/pm/scripts/cancel.py
+      must_call: cascade
+  skill_texts:
+    - file: skills/pm/scripts/cancel.py
+      must_mention: ["cascade", "subtask"]
+  tests: [G31, G27]
+
+- id: cancel_cascade_refuses_absorbing_root
+  description: cascade on a root that's already absorbing is a no-op (returns 6 before DFS).
+  models:
+    - file: system-models/planning_cancel_cascade.als
+      asserts: [CC6_CascadeRefusesAbsorbingRoot]
+  code_gates:
+    - file: skills/pm/scripts/cancel.py
+      must_call: cancel_one
+      must_exit: 6
+  skill_texts:
+    - file: skills/pm/scripts/cancel.py
+      must_mention: ["absorbing", "6"]
+  tests: [G17, G23]
+
+# =====================================================================
+# planning_reclaim_cascade.als — reclaim --cascade DFS over parentTask
+# =====================================================================
+
+- id: reclaim_cascade_descends
+  description: reclaim --cascade reaches every working descendant via parentTask (transitive).
+  models:
+    - file: system-models/planning_reclaim_cascade.als
+      asserts: [RC1_NoWorkingDescendantLeftWorking, RC4_CascadeIsParentTransitive]
+  code_gates:
+    - file: skills/pm/scripts/reclaim.py
+      must_call: cascade
+      must_match: 'parentTask|reverse-link'
+  skill_texts:
+    - file: skills/pm/scripts/reclaim.py
+      must_mention: ["cascade", "parentTask"]
+  tests: [G12, G30]
+
+- id: reclaim_cascade_skips_non_working
+  description: reclaim --cascade only touches working descendants; new/done/rejected untouched.
+  models:
+    - file: system-models/planning_reclaim_cascade.als
+      asserts: [RC2_NewDescendantsUntouched, RC3_TerminalDescendantsUntouched]
+  code_gates:
+    - file: skills/pm/scripts/reclaim.py
+      must_call: reclaim_one
+      must_match: 'working'
+  skill_texts:
+    - file: skills/pm/scripts/reclaim.py
+      must_mention: ["working", "skip"]
+  tests: [G29]
+
+- id: reclaim_cascade_scope
+  description: reclaim --cascade does not touch non-descendants outside the parent⁻¹ closure.
+  models:
+    - file: system-models/planning_reclaim_cascade.als
+      asserts: [RC5_NonDescendantUntouched]
+  code_gates:
+    - file: skills/pm/scripts/reclaim.py
+      must_call: cascade
+  skill_texts:
+    - file: skills/pm/scripts/reclaim.py
+      must_mention: ["cascade", "subtask"]
+  tests: [G31]
+
+- id: reclaim_cascade_refuses_non_working_root
+  description: reclaim only fires on PWorking root.
+  models:
+    - file: system-models/planning_reclaim_cascade.als
+      asserts: [RC6_ReclaimRefusesNonWorkingRoot]
+  code_gates:
+    - file: skills/pm/scripts/reclaim.py
+      must_call: reclaim_one
+      must_exit: 6
+  skill_texts:
+    - file: skills/pm/scripts/reclaim.py
+      must_mention: ["working", "6"]
+  tests: [G32]
+
+# =====================================================================
+# planning_isolation.als — cross-queue + workdir filter
+# =====================================================================
+
+- id: queue_filter
+  description: pm next --queue Q only returns tasks from Q; cross-queue invisible.
+  models:
+    - file: system-models/planning_isolation.als
+      asserts: [Q1_QueueFilterCorrect, Q2_DifferentQueueMutuallyExclusive]
+  code_gates:
+    - file: skills/pm/scripts/next.py
+      must_call: list_tasks
+      must_match: 'args\.queue'
+  skill_texts:
+    - file: skills/pm/scripts/next.py
+      must_mention: ["queue", "filter"]
+  tests: [G2, G14]
+
+- id: workdir_filter
+  description: pm next visibility is workdir-scoped; different non-null workdirs mutually exclusive.
+  models:
+    - file: system-models/planning_isolation.als
+      asserts: [W1_WorkdirFilterCorrect, W3_DifferentWorkdirMutuallyExclusive]
+  code_gates:
+    - file: skills/pm/scripts/next.py
+      must_call: task_workdir
+      must_match: 'workdir_skipped|bound\s*[!=]'
+  skill_texts:
+    - file: skills/pm/scripts/next.py
+      must_mention: ["workdir", "filter"]
+  tests: [G5]
+
+- id: workdir_inheritance
+  description: subtask inherits parent's workdir at plan time (when parent has one and PM_WORKDIR not set).
+  models:
+    - file: system-models/planning_isolation.als
+      asserts: [W2_SubtaskInheritsWorkdir]
+  code_gates:
+    - file: skills/pm/scripts/plan.py
+      must_call: resolve_workdir
+      must_match: 'parent.*workdir|inherit'
+  skill_texts:
+    - file: skills/pm/scripts/plan.py
+      must_mention: ["workdir", "parent"]
+  tests: [G4]
+
+- id: null_workdir_universal
+  description: tasks with no workdir attribute are visible to every worker in their queue.
+  models:
+    - file: system-models/planning_isolation.als
+      asserts: [W4_NullWorkdirUniversallyVisible]
+  code_gates:
+    - file: skills/pm/scripts/next.py
+      must_match: 'bound is None|no workdir'
+  skill_texts:
+    - file: skills/pm/scripts/next.py
+      must_mention: ["no workdir", "legacy"]
+  tests: [G5]
+
+- id: parent_child_same_visibility
+  description: parent + child in same queue are visible to the same worker set (composition of W1+W2).
+  models:
+    - file: system-models/planning_isolation.als
+      asserts: [PCSV_ParentChildSameVisibility]
+  code_gates:
+    - file: skills/pm/scripts/plan.py
+      must_call: resolve_workdir
+    - file: skills/pm/scripts/next.py
+      must_call: task_workdir
+  skill_texts:
+    - file: skills/pm/scripts/plan.py
+      must_mention: ["parent", "workdir"]
+  tests: [G4]
+
+# =====================================================================
+# planning_parent_gate.als — parent-rolls-up-children gate
+# =====================================================================
+
+- id: parent_rolls_up_children
+  description: pm next/pull skips a parent task whose children aren't all in {done, rejected, superseded}.
+  models:
+    - file: system-models/planning_parent_gate.als
+      asserts:
+        - ParentBlockedByPendingChild
+        - ParentRunnableAfterChildrenSettle
+        - NoSelfBlocking
+        - ChildlessNewTaskRunnable
+        - RejectedChildIsTerminalForGate
+        - SupersededChildIsTerminalForGate
+  code_gates:
+    - file: skills/pm/scripts/next.py
+      must_call: children_settled
+      must_match: 'TERMINAL_FOR_PARENT'
+    - file: skills/pm/scripts/pull.py
+      must_call: children_settled
+      must_match: 'TERMINAL_FOR_PARENT'
+  skill_texts:
+    - file: skills/pm/scripts/next.py
+      must_mention: ["children", "terminal"]
+  tests: [G33, G34, G35, G44]
+
+# =====================================================================
+# planning_replan_with_parent_gate.als — cross-feature composition
+# =====================================================================
+
+- id: replan_parent_gate_consistency
+  description: after any replan action, parent-gate predicate stays consistent (no inconsistent runnable+pending-child state).
+  models:
+    - file: system-models/planning_replan_with_parent_gate.als
+      asserts:
+        - P1_ParentGateHoldsAfterReplan
+        - P2_CascadeDownDoesNotCrossParentBoundary
+        - P4_ReplanTargetRunnableWhenUnblocked
+        - P5_SiblingChainOrderingPreservedAfterMidChainReplan
+  code_gates:
+    - file: skills/pm/scripts/replan.py
+      must_call: reset_in_place
+    - file: skills/pm/scripts/next.py
+      must_call: children_settled
+  skill_texts:
+    - file: skills/pm/scripts/replan.py
+      must_mention: ["cascade", "parent"]
+  tests: [G7, G33, G34, G37]
+
+- id: replan_cascade_down_parents
+  description: --cascade-down-parents resets terminal rollup ancestors via parentTask chain (closes StaleRollupWitness).
+  models:
+    - file: system-models/planning_replan_with_parent_gate.als
+      asserts:
+        - P6_CascadeDownParentsClosesStaleRollup
+        - P7_CascadeDownParentsScoped
+  code_gates:
+    - file: skills/pm/scripts/replan.py
+      must_call: find_parent_chain_ancestors
+      must_match: 'cascade.down.parents|cascade_down_parents'
+  skill_texts:
+    - file: skills/pm/scripts/replan.py
+      must_mention: ["cascade-down-parents", "rollup"]
+  tests: [G40, G41, G42, G43]
