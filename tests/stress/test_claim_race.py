@@ -37,10 +37,11 @@ import threading
 import time
 from pathlib import Path
 
-import store
-
-HERE = Path(__file__).parent
-PM = str(HERE / "pm")
+REPO = Path(__file__).resolve().parents[2]
+SCRIPTS = REPO / "skills" / "pm" / "scripts"
+PM = str(SCRIPTS / "pm")
+sys.path.insert(0, str(SCRIPTS))
+import store  # noqa: E402
 
 
 def run_pm(*args: str) -> tuple[int, str, str]:
