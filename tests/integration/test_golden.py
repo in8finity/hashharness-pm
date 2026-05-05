@@ -1955,6 +1955,21 @@ def g65_pm_next_prefers_context_affinity() -> None:
               "G65 no-context-id walker must hit Q first (FIFO)")
 
 
+def g66_executing_distinguishes_missing_task_from_missing_status() -> None:
+    """G66: `pm executing --task <bogus-sha>` exits 17 (task not found)
+    not 16 (no genesis status). Worker loops can blanket-retry on 16
+    (transient genesis-read race) but should give up immediately on 17
+    (sha is wrong / hallucinated). The previous combined exit 16
+    misdiagnosed wrong-sha as a transient race and wasted retries."""
+    bogus = "deadbeef" * 8
+    p = pm("executing", "--task", bogus, check=False)
+    assert_eq(p.returncode, 17,
+              f"G66 missing-task must exit 17; got {p.returncode}\n"
+              f"stderr: {p.stderr}")
+    assert "no Task" in (p.stderr or ""), \
+        f"G66 stderr should explain the sha is unknown; got: {p.stderr!r}"
+
+
 def g54_parent_chain_cycle_refused() -> None:
     """G54: NoCycle on parentTask. bulk_plan with a spec whose `parent`
     chain transitively contains the spec's own deterministic sha (slug)
@@ -2081,6 +2096,7 @@ ALL_FLOWS = {
     "G63": g63_top_level_task_unaffected_by_parent_gate,
     "G64": g64_executing_refuses_child_with_unclaimed_parent,
     "G65": g65_pm_next_prefers_context_affinity,
+    "G66": g66_executing_distinguishes_missing_task_from_missing_status,
 }
 
 

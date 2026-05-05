@@ -16,10 +16,13 @@ Exit codes:
        the parent first to bind the subtree's lifecycle. (Also enforced
        at `pm next` / `pm pull` selection — this is the hard claim-time
        gate that catches direct dispatch / build-task-body resume.)
-  16 — task has no TaskStatus on the chain: either transient (the
-       genesis-status read raced the task creation) or persistent (the
-       task sha is wrong / the task doesn't exist). Distinct from exit
-       6 so callers can retry without conflating with status mismatch.
+  16 — task exists but has no TaskStatus on the chain. Most likely a
+       transient genesis-read race (the TaskStatus(new) write hasn't
+       become visible yet); retry once. Persistent → the chain is
+       corrupt and needs operator inspection.
+  17 — no Task with that text_sha256 exists. Likely a wrong/hallucinated
+       sha; check input. Distinct from 16 so retries don't waste cycles
+       on a sha that will never resolve.
 
 Race-safety: native `chain_predecessor` head-move check on the
 TaskStatus chain — see ``system-models/reports/planning-enforcement.md``.
@@ -75,19 +78,23 @@ def main() -> int:
 
     latest_before = store.latest_status(args.task)
     if latest_before is None:
-        # No TaskStatus on the chain yet. Two known causes:
-        #   (a) the task was just created and the genesis TaskStatus
-        #       hasn't been read back from the storage layer yet —
-        #       transient, retry will succeed.
-        #   (b) the task sha is wrong / the task doesn't exist —
-        #       persistent.
-        # Either way, current state is unactionable; surface as a
-        # distinct exit code so callers can distinguish from the
-        # status-not-`new` case (which is exit 6).
+        # Distinguish "task doesn't exist" from "task exists but has no
+        # genesis TaskStatus yet". The first is a wrong/hallucinated sha
+        # (worker should give up and check input); the second is a
+        # transient genesis-read race (worker should retry once).
+        # Conflating them sends operators down the wrong recovery path.
+        if store.get_task(args.task) is None:
+            sys.stderr.write(
+                f"refusing: no Task with text_sha256={args.task[:12]} "
+                f"found. Check your sha — typo or hallucinated reference. "
+                f"Use `pm show --task <sha>` or look up by slug instead.\n"
+            )
+            return 17
         sys.stderr.write(
-            f"refusing: task {args.task[:12]} has no TaskStatus yet "
-            f"(genesis read race, or task sha wrong). Retry once; "
-            f"if it persists the task likely doesn't exist.\n"
+            f"refusing: task {args.task[:12]} exists but has no "
+            f"TaskStatus on the chain — likely a transient genesis-read "
+            f"race. Retry once; if it persists the task's chain is "
+            f"corrupt and needs operator inspection.\n"
         )
         return 16
     current = store.status_value(latest_before)
