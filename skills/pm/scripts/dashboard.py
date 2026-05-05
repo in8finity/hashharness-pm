@@ -315,11 +315,15 @@ def fetch_state(workdir: str | None = None) -> dict:
         owner = (latest.get("attributes") or {}).get("agent") if isinstance(latest, dict) else None
         ctx = (latest.get("attributes") or {}).get("context_id") if isinstance(latest, dict) else None
 
+        # The free-form body lives in attributes.body — Task.text is
+        # the canonical content-address (`task:<queue>/<slug>`).
+        body = attrs.get("body") or ""
         workdirs[workdir][queue].append({
             "sha": sha,
             "short_sha": sha[:12],
             "slug": attrs.get("slug", "?"),
             "title": t.get("title", "") or "",
+            "body": body,
             "status": status,
             "queue": queue,
             "workdir": workdir,
@@ -495,6 +499,15 @@ a:hover {{ text-decoration: underline; }}
 .event .body th, .event .body td {{ border: 1px solid #ddd; padding: 0.3em 0.6em; text-align: left; vertical-align: top; }}
 .event .body th {{ background: #f5f5f5; font-weight: 600; }}
 .event .body tr:nth-child(even) td {{ background: #fafafa; }}
+.task-body {{ margin: 0.2em 0 0.4em 1.5em; font-size: 0.85em; }}
+.task-body summary {{ cursor: pointer; color: #777; padding: 0.1em 0; }}
+.task-body summary:hover {{ color: #1976d2; }}
+.task-body[open] summary {{ color: #444; font-weight: 600; }}
+.task-body .body {{ margin-top: 0.3em; padding: 0.4em 0.8em; background: #fcfcfc; border: 1px solid #eee; border-radius: 3px; max-height: 30em; overflow-y: auto; color: #222; }}
+.task-body .body p {{ margin: 0.4em 0; line-height: 1.45; }}
+.task-body .body code {{ background: #f3f3f3; padding: 0 0.3em; border-radius: 2px; font-family: ui-monospace, monospace; font-size: 0.92em; }}
+.task-body .body pre {{ background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 3px; padding: 0.5em 0.8em; overflow-x: auto; margin: 0.4em 0; }}
+.task-body .body ul, .task-body .body ol {{ margin: 0.3em 0 0.3em 1.4em; }}
 .event .meta {{ color: #555; font-size: 0.85em; margin-top: 0.2em; }}
 .task-header {{ background: #fff; border: 1px solid #ddd; padding: 0.8em 1em; border-radius: 4px; margin-bottom: 0.8em; }}
 .task-header h2 {{ margin: 0 0 0.3em; }}
@@ -524,6 +537,9 @@ def _render_task(task: dict, children_of: dict, depth: int = 0) -> list[str]:
     title_part = f'<span class="title">— {escape(task["title"])[:80]}</span>' if task["title"] else ""
 
     detail_url = f'/task/{escape(task["sha"])}'
+    # Body intentionally omitted from the list view — see the detail
+    # page (/task/<sha>) for the full task body. Keeps the listing
+    # scannable when a queue has hundreds of tasks.
     out.append(
         f'<div class="task" data-depth="{depth}">'
         f'<span class="status status-{escape(task["status"])}">{escape(task["status"])}</span>'
@@ -698,7 +714,7 @@ def render_task_detail_html(detail: dict, refresh: int) -> str:
     short = sha[:12]
     slug = attrs.get("slug") or "?"
     title = task.get("title") or ""
-    body = (task.get("text") or "").split("\n#nonce:")[0]
+    body = attrs.get("body") or ""
 
     pieces = [HTML_HEAD.format(refresh=refresh)]
     pieces.append(f'<p><a href="/">← back to dashboard</a></p>')

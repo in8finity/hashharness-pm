@@ -1913,6 +1913,48 @@ def g64_executing_refuses_child_with_unclaimed_parent() -> None:
               "G64 child claim succeeds once parent is non-`new`")
 
 
+def g65_pm_next_prefers_context_affinity() -> None:
+    """G65: when --context-id is set, `pm next` returns context-
+    affinitive tasks before non-affinity older tasks. Setup: a sticky
+    parent P (claimed in ctxX) at t1 with a sticky child C (inherits
+    ctxX) at t3; an unrelated non-sticky task Q at t2 (older than C
+    but newer than P). After P is claimed in ctxX, the next call with
+    --context-id ctxX must return C, not Q. Without --context-id the
+    selection collapses to FIFO and Q wins. See proposal-pm-context-
+    preference. Closes the asymmetry: exclusion was implemented;
+    preference is the missing piece."""
+    q = fresh_queue("g65")
+    ctx = pm("context-id").stdout.strip()
+    env = {"PM_CONTEXT_ID": ctx, "PM_WORKDIR": ""}
+
+    # P at t1 (oldest), Q at t2 (middle), C at t3 (newest).
+    par = json.loads(pm("plan", "--queue", q, "--title", "P",
+                        "--text", "sticky parent", "--sticky",
+                        env_extra=env).stdout)["task"]["text_sha256"]
+    other = json.loads(pm("plan", "--queue", q, "--title", "Q",
+                          "--text", "non-sticky unrelated",
+                          env_extra={"PM_WORKDIR": ""}).stdout)["task"]["text_sha256"]
+    child = json.loads(pm("plan", "--queue", q, "--title", "C",
+                          "--text", "sticky child", "--parent", par,
+                          env_extra=env).stdout)["task"]["text_sha256"]
+
+    pm("executing", "--task", par, env_extra=env)
+
+    # With --context-id ctx, child (affinity) wins over Q (older non-affinity).
+    nxt = json.loads(pm("next", "--queue", q,
+                        env_extra=env).stdout)
+    assert_eq(nxt["text_sha256"], child,
+              "G65 affinity-preferred next must return C, not Q")
+
+    # Sanity: without context-id, FIFO is preserved (Q is older than C
+    # AND P is already in `working` so excluded; non-context-id walker
+    # gets Q first because it's older than C).
+    nxt2 = json.loads(pm("next", "--queue", q,
+                         env_extra={"PM_WORKDIR": ""}).stdout)
+    assert_eq(nxt2["text_sha256"], other,
+              "G65 no-context-id walker must hit Q first (FIFO)")
+
+
 def g54_parent_chain_cycle_refused() -> None:
     """G54: NoCycle on parentTask. bulk_plan with a spec whose `parent`
     chain transitively contains the spec's own deterministic sha (slug)
@@ -2038,6 +2080,7 @@ ALL_FLOWS = {
     "G62": g62_child_blocked_until_parent_claimed,
     "G63": g63_top_level_task_unaffected_by_parent_gate,
     "G64": g64_executing_refuses_child_with_unclaimed_parent,
+    "G65": g65_pm_next_prefers_context_affinity,
 }
 
 

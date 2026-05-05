@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 
@@ -45,24 +46,48 @@ def main() -> int:
         default=r"Run /qualify-idea-toulmin (\S+)",
         help="Python regex to extract a path-or-arg from task.text; group 1.",
     )
+    p.add_argument("--context-id", default=None,
+                   help="sticky context id (overrides $PM_CONTEXT_ID). "
+                        "Same selection semantics as `pm next --context-id`: "
+                        "context-affinitive tasks come first, then FIFO.")
     args = p.parse_args()
 
     pat = re.compile(args.regex)
+    agent_context = args.context_id or os.environ.get("PM_CONTEXT_ID") or None
 
     for attempt in range(args.max_retries + 1):
         # Re-implement next.py logic inline to avoid double round-trip.
-        tasks = sorted(store.list_tasks(args.queue), key=lambda t: t.get("created_at", ""))
+        tasks = store.list_tasks(args.queue)
 
         # record→text translation matches next.py so the runnable-set
         # here is identical to what `pm next` would return.
         record_to_text = {t["record_sha256"]: t["text_sha256"] for t in tasks}
 
         status_cache: dict[str, str | None] = {}
+        ctx_cache: dict[str, set[str]] = {}
 
         def status_of(sha: str) -> str | None:
             if sha not in status_cache:
                 status_cache[sha] = store.status_value(store.latest_status(sha))
             return status_cache[sha]
+
+        def required_ctx(sha: str) -> set[str]:
+            if sha not in ctx_cache:
+                ctx_cache[sha] = store.collect_required_contexts(sha)
+            return ctx_cache[sha]
+
+        def context_priority(t: dict) -> int:
+            """Same shape as next.py's context_priority — see that file
+            for the rationale. Mirrors so pull's selection order matches
+            what `pm next` would return."""
+            if agent_context is None:
+                return 1
+            sha = t["text_sha256"]
+            if store.task_context_id(sha) == agent_context:
+                return 0
+            return 0 if agent_context in required_ctx(sha) else 1
+
+        tasks.sort(key=lambda t: (context_priority(t), t.get("created_at", "")))
 
         def dep_done(d_record: str) -> bool:
             d_text = record_to_text.get(d_record)

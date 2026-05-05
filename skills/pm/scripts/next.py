@@ -51,18 +51,44 @@ def main() -> int:
     agent_context = args.context_id or os.environ.get("PM_CONTEXT_ID") or None
 
     tasks = store.list_tasks(args.queue)
-    tasks.sort(key=lambda t: t.get("created_at", ""))
 
     # Link values are record_sha256 (hashharness link contract); we key
     # status lookups off text_sha256, so build a one-shot translation.
     record_to_text = {t["record_sha256"]: t["text_sha256"] for t in tasks}
 
     status_cache: dict[str, str | None] = {}
+    ctx_cache: dict[str, set[str]] = {}
 
     def status_of(sha: str) -> str | None:
         if sha not in status_cache:
             status_cache[sha] = store.status_value(store.latest_status(sha))
         return status_cache[sha]
+
+    def required_ctx(sha: str) -> set[str]:
+        """Cached collect_required_contexts — same per-call scope as
+        status_cache. Bounds the cost of context-affinity sorting at
+        O(N) total instead of O(N²) per pm next call."""
+        if sha not in ctx_cache:
+            ctx_cache[sha] = store.collect_required_contexts(sha)
+        return ctx_cache[sha]
+
+    def context_priority(t: dict) -> int:
+        """0 if this caller has affinity to t (own context_id matches,
+        or inherited via the sticky-ancestor chain); 1 otherwise. Used
+        as the primary sort key so a worker drains its own subtree
+        before competing for unrelated older tasks. No-op when the
+        caller has no PM_CONTEXT_ID — every task gets priority 1 and
+        the sort collapses to pure created_at FIFO. See
+        proposal-pm-context-preference (planning-shared/next.py)."""
+        if agent_context is None:
+            return 1
+        sha = t["text_sha256"]
+        own = store.task_context_id(sha)
+        if own == agent_context:
+            return 0
+        return 0 if agent_context in required_ctx(sha) else 1
+
+    tasks.sort(key=lambda t: (context_priority(t), t.get("created_at", "")))
 
     def dep_done(d_record: str) -> bool:
         d_text = record_to_text.get(d_record)
