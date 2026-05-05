@@ -25,26 +25,39 @@ board.
 ### Worker prompt (template for each spawned Agent)
 
 ```
-You are planning worker. Repeat until the queue is empty:
+You are a planning worker. Repeat until the queue is empty:
 
-1. Run: <skills>/pm/scripts/pm next --queue <Q>
-   - If output is "null", stop and report "queue empty".
-   - Otherwise parse the JSON; record task.text_sha256 as TASK.
-2. Claim it: <skills>/pm/scripts/pm executing --task TASK
-   - If exit code 6, the task was not `new` — go to step 1.
-   - If exit code 8, post-append race lost — go to step 1.
-   - Only proceed on exit 0.
-3. Read `task.attributes.body` (the description) and execute the work.
+1. Atomically pull-and-claim the next runnable task:
+
+       eval "$(skills/pm/scripts/pm pull --queue <Q>)"
+
+   This sets shell vars TASK=<sha>, IDEA_PATH=<...>, SLUG=<...>.
+   If $TASK is empty after the eval, the queue is empty (or all
+   claim races lost) — stop and report "queue empty".
+
+   `pm pull` is preferred over the split `pm next + pm executing`
+   form below because it eliminates two failure modes structurally:
+     - SHA hallucination: the worker never types or rebuilds the sha.
+     - Race window: claim is atomic on the chain (chain_predecessor
+       on prevStatus); the loser is retried internally.
+
+   Use the split form (next then executing) ONLY for diagnostic flows
+   where you want to inspect the candidate before claiming, or run
+   custom logic between selection and claim. See "Diagnostic split
+   form" below.
+
+2. Read `task.attributes.body` (the description) and execute the work.
+   Inspect via `skills/pm/scripts/pm show --task "$TASK"`.
    - If you decide to spawn a subtask, run `pm plan` with --parent TASK so
      the new task is chained to your current TaskStatus.
    - **Heartbeat between chunks**: at every natural checkpoint (between
      file edits, before long tool calls, after a sub-step finishes), run
-     `<skills>/pm/scripts/pm heartbeat --task TASK`.
+     `skills/pm/scripts/pm heartbeat --task TASK`.
      If you go silent on the chain for longer than the queue TTL
      (default 300s), `pm sweep` will treat your claim as a zombie and
      reclaim the task — your work would be lost. Cheap to tick; do it
      liberally.
-4. **If `task.attributes.verifier` starts with `skill:` or `prompt:`**,
+3. **If `task.attributes.verifier` starts with `skill:` or `prompt:`**,
    you MUST apply that verifier to your own work BEFORE submitting the
    report, and append a `## Verifier Attestation` section to the report
    body in this exact form:
@@ -63,16 +76,42 @@ You are planning worker. Repeat until the queue is empty:
    isn't PASS. (`verify-skill:` / `verify-prompt:` and shell-path
    verifiers do NOT require an attestation block — `pm finished` runs
    them itself.)
-5. Submit proof: <skills>/pm/scripts/pm report --task TASK \
+4. Submit proof: skills/pm/scripts/pm report --task "$TASK" \
         --title "<short>" --text-file <path-to-output>
-6. Close: <skills>/pm/scripts/pm finished --task TASK
+5. Close: skills/pm/scripts/pm finished --task "$TASK"
    (use --rejected if the work cannot be completed)
    - If exit code 9, the verifier for this task failed. Do not mark the
      task done; update the work, submit a fresh report (with a fresh
      attestation block, if applicable), and retry or reject it
      explicitly.
-7. Loop.
+6. Loop.
 ```
+
+### Diagnostic split form
+
+When you need to inspect what would be claimed without claiming, or
+run custom logic between selection and claim, use the split form:
+
+```
+1. JSON=$(skills/pm/scripts/pm next --queue <Q>)
+   - If "$JSON" == "null", queue is empty.
+   - Otherwise TASK=$(echo "$JSON" | jq -r .text_sha256).
+2. skills/pm/scripts/pm executing --task "$TASK"
+   - Exit codes (since v0.6.2):
+       6  task not in `new` (somebody beat you to claim) — re-loop.
+       8  claim race lost between your read and the chain CAS — re-loop.
+       10 sticky-context refusal (your context can't claim this task).
+       15 parent-claim gate (parent task is still `new` — claim it first).
+       16 task exists but no TaskStatus on the chain (transient genesis-
+          read race) — retry once.
+       17 task sha doesn't exist (typo / hallucinated) — give up.
+   - Only proceed on exit 0.
+3. Continue at step 2 of the canonical worker loop above (verifier,
+   heartbeat, report, finished).
+```
+
+The atomic `pm pull` form folds steps 1+2 into one call and retries
+race-loss internally — prefer it for production worker loops.
 
 ### Liveness / zombie recovery
 

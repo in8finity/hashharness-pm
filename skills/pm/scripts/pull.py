@@ -130,8 +130,14 @@ def main() -> int:
             sys.stderr.write(f"pull: race lost on {sha[:16]} (attempt {attempt+1}/{args.max_retries+1})\n")
             continue
 
-        slug = (candidate.get("attributes") or {}).get("slug") or ""
-        text = candidate.get("text") or ""
+        attrs = candidate.get("attributes") or {}
+        slug = attrs.get("slug") or ""
+        # Match against attributes.body — that's where the human-written
+        # body lives. Task.text is the canonical content-address
+        # (`task:<queue>/<slug>`) and never contains the workflow
+        # command. Falls back to task.text for legacy tasks created
+        # before the body migration.
+        text = attrs.get("body") or candidate.get("text") or ""
         m = pat.search(text)
         idea_path = m.group(1) if m else ""
 
