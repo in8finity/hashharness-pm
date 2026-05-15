@@ -3,12 +3,12 @@
 # bash-side validation and optional recursion into nested skill invocations.
 #
 # Two extraction modes:
-#   --mode llm     (default if claude is on PATH)  — calls `claude -p` with a
-#                  structured prompt, then VALIDATES that every step's anchor
-#                  is a verbatim substring of the source SKILL.md. Steps that
-#                  fail validation are marked verified=false in the output
-#                  rather than dropped — the caller can decide whether to
-#                  trust them.
+#   --mode llm     (default if a supported LLM CLI is on PATH) — calls either
+#                  `claude -p` or `codex exec -` with a structured prompt,
+#                  then VALIDATES that every step's anchor is a verbatim
+#                  substring of the source SKILL.md. Steps that fail
+#                  validation are marked verified=false in the output rather
+#                  than dropped — the caller can decide whether to trust them.
 #   --mode regex   — falls back to extract_steps.py (the existing pattern-
 #                  matching extractor). Always available; no LLM dependency.
 #
@@ -31,13 +31,75 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 REGEX_EXTRACTOR="$SCRIPT_DIR/../skill-shared/extract_steps.py"
-[[ -f "$REGEX_EXTRACTOR" ]] || REGEX_EXTRACTOR="$HOME/.claude/skills/pm-skill-shared/extract_steps.py"
+if [[ ! -f "$REGEX_EXTRACTOR" ]]; then
+  for cand in \
+      "$HOME/.codex/skills/pm-skill-shared/extract_steps.py" \
+      "$HOME/.codex/skills/.system/pm-skill-shared/extract_steps.py" \
+      "$HOME/.claude/skills/pm-skill-shared/extract_steps.py"; do
+    if [[ -f "$cand" ]]; then
+      REGEX_EXTRACTOR="$cand"
+      break
+    fi
+  done
+fi
 
 skill_name=""
 skill_path=""
 mode="auto"
 max_depth=2
 validate="yes"
+llm_cli=""
+
+pick_llm_cli() {
+  local override="${PM_LLM_CLI:-}"
+  if [[ -n "$override" ]]; then
+    case "$override" in
+      codex|claude)
+        llm_cli="$override"
+        return 0
+        ;;
+      *)
+        echo "unsupported PM_LLM_CLI value: $override (expected codex or claude)" >&2
+        return 1
+        ;;
+    esac
+  fi
+
+  if [[ -n "${CODEX_THREAD_ID:-}${CODEX_CI:-}${CODEX_SANDBOX:-}" ]] \
+     && command -v codex >/dev/null 2>&1; then
+    llm_cli="codex"
+    return 0
+  fi
+  if [[ -n "${CLAUDE_PROJECT_DIR:-}${CLAUDE_ENV_FILE:-}${CLAUDE_CODE_SIMPLE:-}" ]] \
+     && command -v claude >/dev/null 2>&1; then
+    llm_cli="claude"
+    return 0
+  fi
+  if command -v claude >/dev/null 2>&1; then
+    llm_cli="claude"
+    return 0
+  fi
+  if command -v codex >/dev/null 2>&1; then
+    llm_cli="codex"
+    return 0
+  fi
+  return 1
+}
+
+run_llm_cli() {
+  case "$llm_cli" in
+    claude)
+      printf '%s' "$1" | claude -p 2>/dev/null
+      ;;
+    codex)
+      printf '%s' "$1" | codex exec --skip-git-repo-check - 2>/dev/null
+      ;;
+    *)
+      echo "unsupported llm cli: $llm_cli" >&2
+      return 1
+      ;;
+  esac
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -56,13 +118,16 @@ done
 
 [[ -n "$skill_name" || -n "$skill_path" ]] || { echo "provide skill name or --path" >&2; exit 64; }
 
-# Auto-pick mode: prefer LLM if claude is available, else regex.
+# Auto-pick mode: prefer LLM if a supported CLI is available, else regex.
 if [[ "$mode" == "auto" ]]; then
-  if command -v claude >/dev/null 2>&1; then
+  if pick_llm_cli >/dev/null 2>&1; then
     mode="llm"
   else
     mode="regex"
   fi
+fi
+if [[ "$mode" == "llm" ]]; then
+  pick_llm_cli
 fi
 
 # Normalise subskill references that come back from LLM extraction with
@@ -73,12 +138,18 @@ skill_name="${skill_name#/}"
 skill_name="${skill_name#skill:}"
 
 # Resolve SKILL.md path if only name was given.
-# Search order: user skills, project commands, user commands, plugin skills.
+# Search order: Codex skills, agent skills, Claude skills, then plugin caches.
 if [[ -z "$skill_path" ]]; then
   for cand in \
+      "$HOME/.codex/skills/$skill_name/SKILL.md" \
+      "$HOME/.codex/skills/.system/$skill_name/SKILL.md" \
+      "$HOME/.agents/skills/$skill_name/SKILL.md" \
       "$HOME/.claude/skills/$skill_name/SKILL.md" \
       "$PWD/.claude/commands/$skill_name.md" \
       "$HOME/.claude/commands/$skill_name.md" \
+      "$HOME/.codex/plugins/cache"/*/*/*/skills/"$skill_name"/SKILL.md \
+      "$HOME/.codex/plugins/cache"/*/*/skills/"$skill_name"/SKILL.md \
+      "$HOME/.codex/plugins/cache"/*/skills/"$skill_name"/SKILL.md \
       "$HOME/.claude/plugins/marketplaces"/*/skills/"$skill_name"/SKILL.md \
       "$HOME/.claude/plugins/cache"/*/*/*/skills/"$skill_name"/SKILL.md \
       "$HOME/.claude/plugins/cache"/*/*/skills/"$skill_name"/SKILL.md \
@@ -102,7 +173,7 @@ fi
 # ---- llm mode -----------------------------------------------------------
 
 LLM_PROMPT="$(cat <<'PROMPT'
-You are extracting the major workflow steps from a Claude Code skill's
+You are extracting the major workflow steps from an agent skill's
 SKILL.md. The SKILL.md is in the file path provided to you.
 
 Your job:
@@ -145,9 +216,9 @@ skill_md_content="$(cat "$skill_path")"
 full_prompt=$(printf "%s\n\n<skill_path>\n%s\n</skill_path>\n\n<skill_content>\n%s\n</skill_content>\n" \
   "$LLM_PROMPT" "$skill_path" "$skill_md_content")
 
-# Call claude -p; capture JSON. Failure here surfaces stderr + exits.
-llm_out=$(printf '%s' "$full_prompt" | claude -p 2>/dev/null) || {
-  echo "claude -p failed; falling back to regex" >&2
+# Call the chosen LLM CLI; capture JSON. Failure here surfaces stderr + exits.
+llm_out=$(run_llm_cli "$full_prompt") || {
+  echo "$llm_cli invocation failed; falling back to regex" >&2
   exec python3 "$REGEX_EXTRACTOR" --path "$skill_path"
 }
 

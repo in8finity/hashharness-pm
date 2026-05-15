@@ -3,6 +3,14 @@
 A queue/board for agent work, persisted on hashharness as an append-only
 chain of immutable items.
 
+The core `pm` scripts and SKILL.md workflows are intended to work under
+both Codex and Claude Code. The optional hooks under
+`skills/pm/hooks/` are Claude-specific.
+
+For Codex-specific startup and pre-stop substitutes, see
+`skills/pm/scripts/codex_pm.sh`, `pm owned-check`, and
+`docs/codex-integration.md`.
+
 ## Skills
 
 | Skill              | Purpose                                                       |

@@ -61,9 +61,10 @@ latest report. Three forms are supported:
   non-PASS verdict → exit 9, task stays in `working`.
 
 - **`verify-skill:NAME`** / **`verify-prompt:CRITERION`** — opt-in:
-  `pm finished` spawns `claude -p` as an independent subprocess that
-  judges the report. Use when self-attestation isn't trusted enough.
-  Requires `claude` CLI on PATH.
+  `pm finished` spawns Codex or Claude Code as an independent
+  subprocess that judges the report. Use when self-attestation isn't
+  trusted enough. Requires either `codex` or `claude` on PATH (or set
+  `PM_LLM_CLI` to choose one explicitly).
 
 - **`<shell command>`** — script-path verifier; spawned with
   `PM_TASK`, `PM_REPORT_SHA`, `PM_QUEUE`, `PM_SLUG`, `PM_VERIFIER` env

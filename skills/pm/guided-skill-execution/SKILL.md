@@ -330,5 +330,8 @@ After the last step is `done`, present:
   `pm-execute/SKILL.md` ("Permission allowlist gotchas"). Short
   version: `Bash(pm next *)` doesn't match bare `pm next` (no args),
   and `export X=Y; pm ...` chains don't match `Bash(pm ...)`. For
-  sticky work, always pass `--context-id <ctx>` inline; never tell
-  the worker to `export PM_CONTEXT_ID` themselves.
+  sticky work, pass `--context-id <ctx>` inline to every verb that
+  writes to the chain (`executing`, `pull`, `report`, `finished`,
+  `heartbeat`) or filters by sticky binding (`next`); read-only
+  verbs (`show`, `list`, `tree`) don't accept it. Never tell the
+  worker to `export PM_CONTEXT_ID` themselves.

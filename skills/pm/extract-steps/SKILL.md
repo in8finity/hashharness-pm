@@ -6,7 +6,7 @@ description: >
   in the source (catches LLM hallucination), and optional recursion
   into nested skill invocations (step X of skill A invoking skill B
   yields nested steps named `X.B.S1`, `X.B.S2`, ...). Two modes —
-  llm (semantic, default when claude is on PATH) and regex (pattern-
+  llm (semantic, default when a supported LLM CLI is on PATH) and regex (pattern-
   matching fallback). Used internally by pm-auto-skill-execution,
   pm-assisted-skill-execution, pm-guided-skill-execution; also
   callable standalone for inspecting a skill's structure.
@@ -33,10 +33,11 @@ description: >
 
 Or by absolute path: `pm extract-steps --path /abs/path/to/SKILL.md ...`
 
-Default mode is `auto` — picks `llm` if `claude` is on PATH, else
-falls back to `regex`. Default max-depth is 2 (parent + 2 nested
-levels). Validation is on by default; `--no-validate` skips the
-grep-back check (faster, but loses the `verified` flag).
+Default mode is `auto` — picks `llm` if either `claude` or `codex`
+is on PATH, else falls back to `regex`. Default max-depth is 2
+(parent + 2 nested levels). Validation is on by default;
+`--no-validate` skips the grep-back check (faster, but loses the
+`verified` flag).
 
 ## Output JSON shape
 
@@ -86,11 +87,12 @@ Each step carries:
 
 ## Two modes
 
-### llm mode (default when `claude` is on PATH)
+### llm mode (default when a supported LLM CLI is on PATH)
 
-Calls `claude -p` with a structured prompt that asks for the major
-workflow steps, the anchor line for each, and any subskills invoked.
-The LLM does semantic extraction — it understands "## Phase 0",
+Calls either `claude -p` or `codex exec -` with a structured prompt
+that asks for the major workflow steps, the anchor line for each,
+and any subskills invoked. The LLM does semantic extraction — it
+understands "## Phase 0",
 "### Step 1", "1. Foo", "If the user says X, run skill Y" all as the
 same shape, where regex-only would treat them as different.
 
@@ -151,7 +153,9 @@ the whole extraction.
 
 - `<skill-name>` — name of the skill to extract from. Resolved to a
   SKILL.md path via the same search order extract_steps.py uses
-  (`~/.claude/skills/<name>`, plugin marketplace, plugin cache).
+  (`~/.codex/skills/<name>`, `~/.codex/skills/.system/<name>`,
+  `~/.agents/skills/<name>`, `~/.claude/skills/<name>`, plugin
+  caches/marketplaces).
 - `--path <abs>` — absolute path to a SKILL.md (overrides name).
 - `--mode <auto|llm|regex>` — extraction strategy. Default `auto`.
 - `--max-depth <N>` — how many levels of nested-skill recursion
@@ -160,8 +164,9 @@ the whole extraction.
 
 ## Failure modes worth knowing
 
-- **`claude -p` unavailable.** Auto mode silently falls back to
-  regex. Explicit `--mode llm` will exit with the failure message.
+- **No supported LLM CLI available.** Auto mode silently falls back to
+  regex. Explicit `--mode llm` exits unless either `claude` or `codex`
+  is available (or `PM_LLM_CLI` points at one).
 - **LLM returns non-JSON despite the prompt.** The script tries a
   best-effort code-fence strip, then falls back to regex extraction
   rather than failing.

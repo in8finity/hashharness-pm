@@ -1,0 +1,2 @@
+prefix_rule(pattern=["skills/pm/scripts/pm_owned_check.sh"], decision="allow")
+prefix_rule(pattern=["./skills/pm/scripts/pm_owned_check.sh"], decision="allow")

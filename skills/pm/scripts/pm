@@ -18,6 +18,8 @@
 #   pm cancel          [-- args for cancel.py — supervisor cancel + cascade]
 #   pm replan          [-- args for replan.py — restart task + upstream chain]
 #   pm context-id      [-- args for context_id.py — generate sticky-context UUID]
+#   pm owned           [-- args for owned.py — list this agent's open working tasks]
+#   pm owned-check     [-- args for pm_owned_check.sh — strict pre-stop owned-task check]
 #   pm dashboard       [-- args for dashboard.py — minimal HTTP dashboard]
 #   pm show            [-- args for show.py — print one task's full detail (text or JSON)]
 #   pm build-task-body [-- args for build_task_body.py — assemble a structured task body for one extracted step]
@@ -56,6 +58,8 @@ case "${1:-}" in
   cancel)     shift; exec "$DIR/cancel.py" "$@" ;;
   replan)     shift; exec "$DIR/replan.py" "$@" ;;
   context-id) shift; exec "$DIR/context_id.py" "$@" ;;
+  owned)      shift; exec "$DIR/owned.py" "$@" ;;
+  owned-check) shift; exec "$DIR/pm_owned_check.sh" "$@" ;;
   dashboard)  shift; exec "$DIR/dashboard.py" "$@" ;;
   show)       shift; exec "$DIR/show.py" "$@" ;;
   build-task-body) shift; exec "$DIR/build_task_body.py" "$@" ;;

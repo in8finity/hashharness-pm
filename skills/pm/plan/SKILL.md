@@ -56,12 +56,12 @@ description: >
     worker must reason about the criterion and record their verdict
     in the report's attestation block.
   - **`verify-skill:<skill-name>`** / **`verify-prompt:<criterion>`** —
-    opt-in: `pm finished` spawns `claude -p` as an *independent*
-    subprocess that re-judges the task + report. Higher cost; useful
-    when self-attestation isn't trusted enough. Requires the
-    `claude` CLI on PATH (otherwise exit 127, task stays in
-    `working`). The LLM must terminate with `VERDICT: PASS` or
-    `VERDICT: FAIL: <reason>`.
+    opt-in: `pm finished` spawns Codex or Claude Code as an
+    *independent* subprocess that re-judges the task + report. Higher
+    cost; useful when self-attestation isn't trusted enough. Requires
+    either `codex` or `claude` on PATH (otherwise exit 127, task stays
+    in `working`; `PM_LLM_CLI` can force the choice). The LLM must
+    terminate with `VERDICT: PASS` or `VERDICT: FAIL: <reason>`.
   - **`<absolute path>`** (or shell-prefixed command, e.g.
     `env FOO=bar /path/to/check.sh`) — spawn a subprocess. The
     script receives env `PM_TASK`, `PM_REPORT_SHA`, `PM_QUEUE`,

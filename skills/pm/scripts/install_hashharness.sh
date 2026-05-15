@@ -6,12 +6,14 @@
 # the script reports its location and exits 0 without re-installing.
 #
 # Default install location is ~/.hashharness/. The script also accepts
-# --to-claude (~/.claude/hashharness/) or --to-project (./.hashharness/
-# under the current repo). Pass --where <path> for a custom location.
+# --to-codex (~/.codex/hashharness/), --to-claude
+# (~/.claude/hashharness/) or --to-project (./.hashharness/ under the
+# current repo). Pass --where <path> for a custom location.
 #
 # Usage:
 #   install_hashharness.sh                 # interactive: asks where
 #   install_hashharness.sh --to-home       # ~/.hashharness/
+#   install_hashharness.sh --to-codex      # ~/.codex/hashharness/
 #   install_hashharness.sh --to-claude     # ~/.claude/hashharness/
 #   install_hashharness.sh --to-project    # ./.hashharness/
 #   install_hashharness.sh --where <PATH>  # explicit
@@ -48,6 +50,7 @@ port="$DEFAULT_PORT"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --to-home)    mode="home";    shift ;;
+    --to-codex)   mode="codex";   shift ;;
     --to-claude)  mode="claude";  shift ;;
     --to-project) mode="project"; shift ;;
     --where)      mode="explicit"; explicit_where="$2"; shift 2 ;;
@@ -88,6 +91,7 @@ fi
 resolve_install_root() {
   case "$mode" in
     home)     echo "$HOME/.hashharness" ;;
+    codex)    echo "$HOME/.codex/hashharness" ;;
     claude)   echo "$HOME/.claude/hashharness" ;;
     project)
       # Find git repo root, falling back to cwd.
@@ -101,14 +105,15 @@ resolve_install_root() {
       if [[ "$auto_yes" == "yes" ]]; then
         echo "$HOME/.hashharness"
       else
-        printf "Where should hashharness be installed?\n  1) ~/.hashharness            (recommended; per-user)\n  2) ~/.claude/hashharness     (alongside Claude Code skills)\n  3) %s/.hashharness  (per-project)\n  4) custom path\nChoice [1]: " "$(pwd)" >&2
+        printf "Where should hashharness be installed?\n  1) ~/.hashharness            (recommended; per-user)\n  2) ~/.codex/hashharness      (alongside Codex state)\n  3) ~/.claude/hashharness     (alongside Claude Code skills)\n  4) %s/.hashharness  (per-project)\n  5) custom path\nChoice [1]: " "$(pwd)" >&2
         read -r choice
         choice="${choice:-1}"
         case "$choice" in
           1) echo "$HOME/.hashharness" ;;
-          2) echo "$HOME/.claude/hashharness" ;;
-          3) echo "$(pwd)/.hashharness" ;;
-          4)
+          2) echo "$HOME/.codex/hashharness" ;;
+          3) echo "$HOME/.claude/hashharness" ;;
+          4) echo "$(pwd)/.hashharness" ;;
+          5)
             printf "absolute path: " >&2
             read -r custom
             echo "$custom"

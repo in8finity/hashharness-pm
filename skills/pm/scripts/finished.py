@@ -10,7 +10,7 @@ runs before the done transition is allowed. Three forms are supported:
     ``verifier:`` (must match the task verifier verbatim),
     ``verdict: PASS|FAIL[: reason]``, and ``evidence:`` (free-form).
   - ``verify-skill:NAME`` / ``verify-prompt:CRITERION`` — opt-in:
-    re-run as an independent ``claude -p`` subprocess that judges the
+    re-run as an independent Codex/Claude subprocess that judges the
     report. Higher cost; useful when self-attestation isn't trusted.
   - <shell command> — spawn the script with PM_* env + positional shas.
 
@@ -37,6 +37,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from typing import Any
@@ -197,11 +198,68 @@ You may include reasoning, but the LAST line MUST be EXACTLY one of:
 """
 
 
+def resolve_llm_verifier_cli() -> tuple[list[str], str] | tuple[None, str]:
+    """Pick the CLI used for opt-in LLM verification."""
+    override = os.environ.get("PM_LLM_CLI", "").strip().lower()
+    specs = {
+        "claude": (["claude", "-p"], "Claude Code"),
+        "codex": (["codex", "exec", "--skip-git-repo-check", "-"], "Codex"),
+    }
+    if override:
+        spec = specs.get(override)
+        if spec is None:
+            return None, (
+                f"unsupported PM_LLM_CLI={override!r}; expected 'claude' or 'codex'"
+            )
+        argv, label = spec
+        if shutil.which(argv[0]):
+            return argv, label
+        return None, f"{label} CLI ({argv[0]}) not found on PATH"
+
+    codex_env = any(
+        os.environ.get(key)
+        for key in ("CODEX_THREAD_ID", "CODEX_CI", "CODEX_SANDBOX", "CODEX_HOME")
+    )
+    claude_env = any(
+        os.environ.get(key)
+        for key in (
+            "CLAUDE_PROJECT_DIR",
+            "CLAUDE_ENV_FILE",
+            "CLAUDE_CODE_SIMPLE",
+            "CLAUDE_SESSION_ID",
+        )
+    )
+    order = ["claude", "codex"]
+    if codex_env:
+        order = ["codex", "claude"]
+    elif claude_env:
+        order = ["claude", "codex"]
+
+    for name in order:
+        argv, label = specs[name]
+        if shutil.which(argv[0]):
+            return argv, label
+    return None, "no supported LLM verifier CLI found on PATH (expected claude or codex)"
+
+
 def run_llm_verifier(prompt: str, *, verifier_str: str, timeout: int) -> dict[str, Any]:
-    """Spawn the `claude` CLI with a wrapped prompt, parse the VERDICT line."""
+    """Spawn the chosen LLM CLI with a wrapped prompt, parse the VERDICT line."""
+    argv, label_or_reason = resolve_llm_verifier_cli()
+    if argv is None:
+        return {
+            "verifier": verifier_str,
+            "verifier_exit": 127,
+            "verifier_summary": (
+                f"{label_or_reason}. The verify-skill:/verify-prompt: verifier "
+                "variants require either Codex or Claude Code, or a shell-path "
+                "verifier instead."
+            ),
+            "verifier_timeout": False,
+        }
     try:
         proc = subprocess.run(
-            ["claude", "-p", prompt],
+            argv,
+            input=prompt.encode("utf-8"),
             capture_output=True,
             timeout=timeout,
         )
@@ -210,9 +268,10 @@ def run_llm_verifier(prompt: str, *, verifier_str: str, timeout: int) -> dict[st
             "verifier": verifier_str,
             "verifier_exit": 127,
             "verifier_summary": (
-                "`claude` CLI not found on PATH. The skill: and prompt: "
-                "verifier variants spawn Claude Code as a subprocess; "
-                "install Claude Code or use a script-path verifier instead."
+                f"{label_or_reason} CLI not found on PATH. The "
+                "verify-skill:/verify-prompt: verifier variants spawn "
+                "Codex or Claude Code as a subprocess; install one of "
+                "them or use a script-path verifier instead."
             ),
             "verifier_timeout": False,
         }
@@ -227,7 +286,7 @@ def run_llm_verifier(prompt: str, *, verifier_str: str, timeout: int) -> dict[st
     stderr = proc.stderr.decode("utf-8", errors="replace")
     exit_code, verdict_text = parse_verdict(stdout)
     summary = (
-        f"verdict: {verdict_text}\n--llm stdout--\n{stdout}"
+        f"cli: {label_or_reason}\nverdict: {verdict_text}\n--llm stdout--\n{stdout}"
         + (f"\n--llm stderr--\n{stderr}" if stderr.strip() else "")
     )
     return {
@@ -320,9 +379,10 @@ def run_verifier(
                        applying the skill / prompt; this gate just
                        enforces that they did and recorded the verdict.
       ``verify-skill:NAME`` / ``verify-prompt:CRITERION`` — opt-in:
-                       spawn ``claude -p`` as a separate subprocess to
-                       independently re-check the task + report. Useful
-                       when self-attestation is not trusted enough.
+                       spawn Codex or Claude Code as a separate
+                       subprocess to independently re-check the task +
+                       report. Useful when self-attestation is not
+                       trusted enough.
       anything else  — treat as a shell command path; pass task / report
                        sha as positional args plus PM_* env.
     """

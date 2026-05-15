@@ -15,14 +15,14 @@ description: >
 - `--agents N` — number of parallel workers (required)
 - `--queue Q` — board to drain (default `default`)
 
-## Procedure (driven by Claude, not a single script)
+## Procedure (driven by the host agent, not a single script)
 
-This skill orchestrates concurrency by spawning `N` Agent calls **in a
-single message** so they run in parallel. Each agent is given the worker
-loop below as its prompt; they share no state except the hashharness
-board.
+This skill orchestrates concurrency by spawning `N` worker agents **in a
+single parallel batch** so they run concurrently. Each worker is given
+the loop below as its prompt; they share no state except the
+hashharness board.
 
-### Worker prompt (template for each spawned Agent)
+### Worker prompt (template for each spawned worker)
 
 ```
 You are a planning worker. Repeat until the queue is empty:
@@ -171,10 +171,14 @@ This is the runtime version of the formal model in
 
 ### Spawning rule
 
-Send one assistant message that contains `N` `Agent` tool calls; do **not**
-spawn them sequentially — that defeats the purpose. Use `subagent_type:
-"general-purpose"` (or a more specialized agent if the task type calls for
-it).
+Use the platform's agent/delegation primitive to launch `N` workers in
+parallel; do **not** spawn them sequentially.
+
+- **Claude Code:** send one assistant message containing `N` `Agent`
+  tool calls.
+- **Codex:** issue `N` parallel `spawn_agent` calls (or the equivalent
+  worker delegation primitive available in that environment), then wait
+  on them after the batch is launched.
 
 ### When to stop
 
@@ -182,7 +186,11 @@ Workers stop when `pm next` returns `null`. The orchestrator (you) waits
 for all `N` agents to complete and then summarizes: tasks done, tasks
 rejected, tasks left (should be zero or blocked-on-deps).
 
-### Permission allowlist gotchas (sub-agent invocation)
+### Claude permission allowlist gotchas (sub-agent invocation)
+
+This section is Claude-specific. Codex workers do not use Claude's
+literal `Bash(...)` allowlist matcher, so the command-shape caveats
+below do not apply there.
 
 Sub-agents typically run under a permission allowlist that constrains
 which Bash commands they can execute. The matcher is a **literal-
@@ -234,7 +242,11 @@ next`; all are subtle and hard to diagnose from the worker's side
 
    For sticky-context work, mint the context once at the orchestrator
    and pass it down as an explicit `--context-id` flag in the worker
-   prompt template — never tell the worker to `export` it themselves.
+   prompt template — on every verb that writes to the chain
+   (`executing`, `pull`, `report`, `finished`, `heartbeat`) or
+   filters by sticky binding (`next`). Read-only verbs (`show`,
+   `list`, `tree`) don't accept it. Never tell the worker to
+   `export` it themselves.
 
 A "dry-run permission check" helper would catch this in 1 second; in
 the meantime, when a worker dies on the first `pm next` and the error

@@ -3,8 +3,9 @@ name: pm-install
 description: >
   Install the hashharness MCP backend that pm uses for its append-only
   storage. Bootstraps an isolated Python venv, installs hashharness from
-  git, generates a launcher script and a source-able env file. Three
+  git, generates a launcher script and a source-able env file. Four
   install locations: ~/.hashharness/ (per-user, recommended),
+  ~/.codex/hashharness/ (alongside Codex state),
   ~/.claude/hashharness/ (alongside Claude Code skills), or
   ./.hashharness/ (per-project at git root). Idempotent — re-running
   reports the existing install and exits 0. Use when a fresh
@@ -31,23 +32,24 @@ description: >
 
 ## Procedure
 
-`../scripts/pm install [--to-home | --to-claude | --to-project | --where PATH] [--port N] [--yes] [--check]`
+`../scripts/pm install [--to-home | --to-codex | --to-claude | --to-project | --where PATH] [--port N] [--yes] [--check]`
 
 Or, equivalently:
 
 `../scripts/install_hashharness.sh ...same args...`
 
-Without flags it's interactive — picks one of three locations from a
+Without flags it's interactive — picks one of four locations from a
 menu. With `--yes` it skips prompts and uses defaults (which means
 `~/.hashharness/`, port 38417). With `--check` it reports whether
 hashharness is already installed at the chosen location and exits
 non-zero if not, without changing anything.
 
-## Three install locations
+## Install locations
 
 | Flag | Path | When |
 |---|---|---|
 | `--to-home` | `~/.hashharness/` | **Default**. One backend per user, shared across all projects. |
+| `--to-codex` | `~/.codex/hashharness/` | If you keep Codex state under `~/.codex/`. |
 | `--to-claude` | `~/.claude/hashharness/` | If you keep all Claude Code state in one place. |
 | `--to-project` | `<git-root>/.hashharness/` (or `cwd` if not in a repo) | When a project needs its own data isolated from the user-wide instance. |
 | `--where <path>` | explicit | For non-standard layouts (e.g. on a network volume, in `/opt`, etc.). |
@@ -104,7 +106,7 @@ After that, every other pm command works.
 
 ## Inputs
 
-- `--to-home` / `--to-claude` / `--to-project` / `--where <path>` —
+- `--to-home` / `--to-codex` / `--to-claude` / `--to-project` / `--where <path>` —
   pick install location (interactive menu if none given).
 - `--port <N>` — HTTP port for the MCP server (default 38417).
 - `--yes` / `-y` — non-interactive; use defaults for unset choices.

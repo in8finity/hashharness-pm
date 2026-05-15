@@ -40,6 +40,7 @@ fi
 ENV_CANDIDATES=(
   "${HASHHARNESS_ENV:-}"
   "$HOME/.hashharness/env"
+  "$HOME/.codex/hashharness/env"
   "$HOME/.claude/hashharness/env"
 )
 [[ -n "${CLAUDE_PROJECT_DIR:-}" ]] && ENV_CANDIDATES+=("$CLAUDE_PROJECT_DIR/.hashharness/env")

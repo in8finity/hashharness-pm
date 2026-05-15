@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 r"""Extract a list of step titles from a skill's SKILL.md.
 
-Locates the SKILL.md by name (search order: ~/.claude/skills/<name>,
-~/.claude/plugins/marketplaces/*/skills/<name>, ~/.claude/plugins/cache/*/skills/<name>,
-or any path matching */skills/<name>/SKILL.md). Then tries three extraction
-strategies in order; the first that yields >=2 steps wins.
+Locates the SKILL.md by name across common Codex and Claude layouts
+(`~/.codex/skills`, `~/.codex/plugins/cache`, `~/.agents/skills`,
+`~/.claude/skills`, `~/.claude/plugins/...`). Then tries three
+extraction strategies in order; the first that yields >=2 steps wins.
 
 Strategies:
   1. step-headings       lines matching ^#{1,6}\s*Step\s*\d+
@@ -44,8 +44,17 @@ BOILERPLATE_HEADINGS = {
 
 def find_skill_md(name: str) -> Path:
     candidates = [
+        HOME / ".codex" / "skills" / name / "SKILL.md",
+        HOME / ".codex" / "skills" / ".system" / name / "SKILL.md",
+        HOME / ".agents" / "skills" / name / "SKILL.md",
         HOME / ".claude" / "skills" / name / "SKILL.md",
     ]
+    candidates += [Path(p) for p in glob(
+        str(HOME / ".codex" / "plugins" / "cache" / "*" / "*" / "*" / "skills" / name / "SKILL.md"))]
+    candidates += [Path(p) for p in glob(
+        str(HOME / ".codex" / "plugins" / "cache" / "*" / "*" / "skills" / name / "SKILL.md"))]
+    candidates += [Path(p) for p in glob(
+        str(HOME / ".codex" / "plugins" / "cache" / "*" / "skills" / name / "SKILL.md"))]
     candidates += [Path(p) for p in glob(
         str(HOME / ".claude" / "plugins" / "marketplaces" / "*" / "skills" / name / "SKILL.md"))]
     candidates += [Path(p) for p in glob(
@@ -57,7 +66,9 @@ def find_skill_md(name: str) -> Path:
     for p in candidates:
         if p.exists():
             return p
-    sys.exit(f"error: SKILL.md for '{name}' not found in standard locations")
+    sys.exit(
+        f"error: SKILL.md for '{name}' not found in standard Codex/Claude locations"
+    )
 
 
 STEP_HEADING_RE = re.compile(r"^(#{1,6})\s*Step\s+(\d+)\b\.?\s*(.*?)\s*$", re.I)

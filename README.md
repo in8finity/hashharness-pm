@@ -1,6 +1,6 @@
 # hashharness-pm
 
-**A planning board for coordinating coding agents that need to work in parallel, survive restarts, and prove what they did.** Sixteen Claude Code skills and a `pm` CLI dispatcher backed by [hashharness](https://github.com/in8finity/hashharness)'s append-only storage.
+**A planning board for coordinating coding agents that need to work in parallel, survive restarts, and prove what they did.** A `pm` CLI dispatcher plus agent skills for Codex and Claude Code, backed by [hashharness](https://github.com/in8finity/hashharness)'s append-only storage.
 
 If you've tried to run multiple agents against the same project and watched them claim the same task twice, lose track of what's done after a crash, or finish work without recording proof of it — those are the problems this solves.
 
@@ -43,7 +43,7 @@ For higher-stakes work, declare a **verifier** at plan time (`--verifier`):
 | Form | What runs |
 |---|---|
 | `skill:NAME` / `prompt:CRITERION` | Worker self-attests in the report; `pm finished` parses a `## Verifier Attestation` block and gates on the verdict. No subprocess. |
-| `verify-skill:NAME` / `verify-prompt:CRITERION` | Spawns a fresh `claude -p` subprocess to independently re-judge the task body + report. Higher cost; useful when self-attestation isn't trusted enough. |
+| `verify-skill:NAME` / `verify-prompt:CRITERION` | Spawns a fresh Codex or Claude Code subprocess to independently re-judge the task body + report. Higher cost; useful when self-attestation isn't trusted enough. |
 | `<absolute path>` (or `env FOO=bar /path/check.sh`) | Spawns the script with env `PM_TASK`, `PM_REPORT_SHA`, `PM_QUEUE`, `PM_SLUG`, `PM_VERIFIER`. Exit 0 = pass; non-zero = fail (closes with exit 9). |
 
 The verifier's command, exit code, and summary are recorded as attributes on the closing `done` status — and on `--skip-verifier` close-outs too (with `verifier_exit = -1`), so a downstream auditor can spot bypasses.
@@ -82,7 +82,7 @@ For controlled cancellation, `pm cancel` terminates a task and optionally cascad
 0. **First time only — install hashharness.** Bundled installer creates an isolated venv, generates a launcher, writes a source-able `env` file:
    ```bash
    skills/pm/scripts/pm install --to-home --yes      # → ~/.hashharness/
-   # alternatives: --to-claude, --to-project, --where /custom/path
+   # alternatives: --to-codex, --to-claude, --to-project, --where /custom/path
    ```
    Idempotent — re-running on an existing install reports the location and exits 0.
 
@@ -104,7 +104,13 @@ For controlled cancellation, `pm cancel` terminates a task and optionally cascad
    skills/pm/scripts/pm setup
    ```
 
-3. **Drive the worker loop** — through Claude Code via the `pm-*` skills, or directly:
+3. **Launch your agent session**:
+   ```bash
+   skills/pm/scripts/codex_pm.sh                      # Codex with pm env preloaded
+   ```
+   Claude users can keep using the hook-based `.claude/settings.json` setup.
+
+4. **Drive the worker loop** — through the `pm-*` skills, or directly:
    ```bash
    pm plan      --title "Build X" --text "Detailed description..."
    pm next                          # pull next runnable
@@ -113,6 +119,10 @@ For controlled cancellation, `pm cancel` terminates a task and optionally cascad
    pm finished  --task <sha>        # close (requires a report)
    ```
    Skills read `HASHHARNESS_MCP_URL` (default `http://127.0.0.1:38417/mcp`).
+
+For Codex, run `pm owned-check` before ending a session if you want
+the closest substitute to Claude's `Stop` hook. More detail in
+[docs/codex-integration.md](docs/codex-integration.md).
 
 ### Worker loop exit codes
 
@@ -274,7 +284,7 @@ Four chains exist per task: status, report, heartbeat, and (for subtasks) `paren
 ```
 hashharness-pm/
 ├── skills/
-│   └── pm/                          # Sixteen Claude Code skills + shared scripts
+│   └── pm/                          # Agent skills + shared scripts
 │       ├── plan/SKILL.md                    # pm-plan        — enqueue a task
 │       ├── next/SKILL.md                    # pm-next        — pull next runnable task
 │       ├── executing/SKILL.md               # pm-executing   — claim a task

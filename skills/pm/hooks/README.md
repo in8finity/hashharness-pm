@@ -1,5 +1,8 @@
 # hashharness-pm — Claude Code hooks
 
+These hooks are optional and Claude-specific. The core `pm` workflow can
+run under Codex without them.
+
 Optional Claude Code hooks that close gaps the storage protocol can't see at the agent boundary. The protocol enforces what gets *written* to the chain; these hooks catch what an agent is *about to do* before it tries to write something off-protocol or stop a turn with state still open.
 
 ## When to install
@@ -86,6 +89,20 @@ Adjust `$CLAUDE_PROJECT_DIR/skills/pm/hooks/...` to match where you've vendored 
 | `HASHHARNESS_ENV=/path/env` | Override the SessionStart hook's env-file lookup. |
 
 The override mechanism is the documented escape hatch — set the var in the worker's environment when you legitimately need to bypass.
+
+## Codex substitutes
+
+Codex does not expose the same public `SessionStart` / `PreToolUse` /
+`Stop` hook wiring shown above. The closest substitutes in this repo are:
+
+- `skills/pm/scripts/codex_pm.sh` — launch Codex with `HASHHARNESS_MCP_URL`,
+  `pm` on `PATH`, and a stable `PM_CONTEXT_ID` preloaded.
+- `pm owned-check` / `skills/pm/scripts/pm_owned_check.sh` — manual pre-stop
+  check for tasks this session still owns in `working`.
+- Codex MCP-tool approval policy — keep raw `hashharness` write tools behind
+  approval for day-to-day work, and prefer `pm` as the write path.
+
+See `docs/codex-integration.md` for the workflow and limits.
 
 ## What these hooks don't do
 
